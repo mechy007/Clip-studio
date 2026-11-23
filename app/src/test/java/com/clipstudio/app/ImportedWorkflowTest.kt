@@ -108,10 +108,15 @@ class ImportedWorkflowTest {
         val medium = RecordingDownload(start, DownloadQuality.MEDIUM)
         val full = RecordingDownload(start, DownloadQuality.FULL_HD)
         assertEquals(listOf(medium, full), listOf(medium, full, medium).distinct())
+        assertEquals(DownloadQuality.QHD, DownloadQuality.fromHeight(1440))
         DownloadQuality.entries.forEach { quality ->
             val alternatives = recordingFormatSelector(quality.maxHeight).split('/')
-            assertEquals(4, alternatives.size)
+            assertEquals(if (quality == DownloadQuality.QHD) 6 else 4, alternatives.size)
             assertTrue(alternatives.all { "[height<=${quality.maxHeight}]" in it })
+            if (quality == DownloadQuality.QHD) {
+                assertTrue("[height>1080]" in alternatives.first())
+                assertFalse("[vcodec^=avc1]" in alternatives.first())
+            }
         }
     }
 
