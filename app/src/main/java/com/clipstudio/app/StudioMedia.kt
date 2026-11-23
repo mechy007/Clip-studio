@@ -160,11 +160,13 @@ internal object StudioMedia {
         headers.keys().asSequence().associateWith { headers.optString(it) }
     }.orEmpty()
 
-    private suspend fun resolveRecording(context: Context, link: String, previousFormat: String?): RecordingStreams {
+    private suspend fun resolveRecording(
+        context: Context, link: String, previousFormat: String?, audioOnly: Boolean = false
+    ): RecordingStreams {
         val id = YouTubeLinkClassifier.parseVideoId(link)
         val media = runInterruptible {
             YouTubeVideoImporter.prepare(context)
-            val format = previousFormat?.also {
+            val format = if (audioOnly) "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]" else previousFormat?.also {
                 check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
             } ?: "bv[protocol=https][vcodec^=avc1][height<=1080]+ba[protocol=https][acodec^=mp4a]/" +
                 "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
@@ -185,7 +187,7 @@ internal object StudioMedia {
         val durationMs = media.optDouble("duration", 0.0).let { if (it.isFinite()) (it * 1000).toLong() else 0L }
         check(durationMs > 0) { "YouTube has not provided the recording length yet. Try again when the replay is ready." }
         val selectedFormat = media.optString("format_id")
-        check(selectedFormat.isNotBlank() && (previousFormat == null || selectedFormat == previousFormat)) {
+        check(audioOnly || selectedFormat.isNotBlank() && (previousFormat == null || selectedFormat == previousFormat)) {
             "The saved YouTube format is unavailable. Completed parts are still available."
         }
         val separate = media.optJSONArray("requested_formats")
@@ -195,11 +197,58 @@ internal object StudioMedia {
         val inputs = streams.map { stream ->
             MediaStream(stream.optString("url"), mediaRequestHeaders(media.requestHeaders(), stream.requestHeaders()))
         }
-        check(inputs.all { input ->
+        val available = inputs.filter { input ->
             runCatching { URI(input.url) }.getOrNull()?.let { it.scheme == "https" && it.host != null } == true
-        }) { "No compatible video and audio streams were available for this recording." }
+        }
+        check(audioOnly || available.size == inputs.size) { "No compatible video and audio streams were available for this recording." }
 
-        return RecordingStreams(durationMs, selectedFormat, inputs)
+        return RecordingStreams(durationMs, selectedFormat, available)
+    }
+
+    suspend fun scanRecording(
+        context: Context, link: String, startMs: Long, progress: suspend (Int, Int) -> Unit
+    ): List<RecordingScanPart> = withContext(Dispatchers.IO) {
+        val recording = withTimeoutOrNull(60_000) { resolveRecording(context, link, null, audioOnly = true) }
+            ?: error("Could not open the recording for analysis.")
+        val parts = recordingScanRanges(startMs, recording.endMs)
+        check(parts.isNotEmpty()) { "The start time must be before the end of the recording." }
+        val media = recording.inputs.firstOrNull() ?: return@withContext parts.map { RecordingScanPart(it) }
+        val headers = if (media.headers.isEmpty()) emptyList() else listOf("-headers", media.headers)
+        val pcm = File.createTempFile("scan-audio-", ".pcm", context.cacheDir)
+        try {
+            var consecutiveFailures = 0
+            val samples = parts.mapIndexed { index, part ->
+                currentCoroutineContext().ensureActive()
+                progress(index + 1, parts.size)
+                recordingSampleRanges(part).mapNotNull { window ->
+                    if (consecutiveFailures >= 3) return@mapNotNull null
+                    val args = listOf("-nostdin", "-loglevel", "error", "-y", "-rw_timeout", "8000000") + headers +
+                        listOf("-ss", seconds(window.startMs), "-i", media.url, "-t", seconds(window.lengthMs),
+                            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", pcm.absolutePath)
+                    val success = runFfmpeg(args.toTypedArray(), idleTimeoutMs = 9_000L) { }
+                    val measurement = if (success) measureRecordingSample(pcm, window) else null
+                    consecutiveFailures = if (measurement == null) consecutiveFailures + 1 else 0
+                    measurement
+                }
+            }
+            scoreRecordingScan(parts, samples)
+        } finally {
+            pcm.delete()
+        }
+    }
+
+    private fun measureRecordingSample(file: File, range: RecordingPartWindow): AudioEnergyWindow? {
+        val bytes = file.readBytes()
+        val count = bytes.size / 2
+        if (count < minOf(2_000L, range.lengthMs * 4L)) return null
+        var sum = 0.0
+        var peak = 0.0
+        for (index in 0 until count) {
+            val sample = ((bytes[index * 2].toInt() and 255) or (bytes[index * 2 + 1].toInt() shl 8)) / 32768.0
+            sum += sample * sample
+            peak = maxOf(peak, abs(sample))
+        }
+        return AudioEnergyWindow(range.startMs, range.endMs, kotlin.math.sqrt(sum / count).toFloat(), peak.toFloat())
     }
 
     internal fun guidedFullFile(context: Context, projectId: String): File =
@@ -256,7 +305,7 @@ internal object StudioMedia {
     /** Commit each short piece locally so a retry does not fetch completed pieces again. */
     suspend fun downloadRecordingPart(
         context: Context, projectId: String, link: String, startMs: Long, previousFormat: String?,
-        fast: Boolean = false, progress: (GuidedDownloadProgress) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
+        fast: Boolean = false, requestedEndMs: Long? = null, progress: (GuidedDownloadProgress) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
     ) = withContext(Dispatchers.IO) {
         val directory = File(guidedDirectory(context, projectId), startMs.toString())
         val files = GuidedDownloadFiles(directory)
@@ -264,7 +313,8 @@ internal object StudioMedia {
         val plan = files.load(startMs) ?: run {
             val streams = resolveGuidedRecording(context, link, previousFormat)
             recording = streams
-            val range = nextRecordingPart(startMs, streams.endMs) ?: return@withContext
+            val end = minOf(streams.endMs, requestedEndMs ?: streams.endMs)
+            val range = nextRecordingPart(startMs, end) ?: return@withContext
             check(directory.isDirectory || directory.mkdirs()) { "Could not create download storage." }
             GuidedDownloadPlan(range, streams.endMs, streams.format).also(files::save)
         }
