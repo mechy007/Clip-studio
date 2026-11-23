@@ -35,7 +35,7 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and models
 
 ## Timeline and project tools
 
-- **Preview edited clip** renders a lower-resolution playback copy using the export layout, facecam path, audio effects, and caption timings. The waveform and playhead scrub the source while setting the clip boundaries.
+- **Preview export** renders a lower-resolution playback copy using the export layout, facecam path, audio effects, and caption timings. The waveform and playhead scrub the source while setting the clip boundaries.
 - **Resume download** uses the saved section boundary and selected format when reconnecting to a compatible recorded YouTube source. **Edit across next section** joins two consecutive ready parts into an edit source while the rest of the download continues.
 - **Highlight focus** offers balanced, funny reactions, gameplay action, and talking highlights. Nearby overlapping suggestions are deduplicated.
 - **Track facecam** samples the trimmed interval and animates its crop. Either crop can be locked, and framing can still be adjusted manually.
@@ -45,10 +45,10 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and models
 ## Faster editing and exports
 
 - **Fast Export** checks for hardware H.264 at the requested 720p, 1080p, or 1440p size and 30 fps. It uses the same layout, tracking, caption and audio filters, and retries in software if the hardware attempt fails. **Quick trim** keeps source framing and audio, copying compatible tracks when the start aligns with a sync frame and using an accurate render otherwise.
-- **Live preview** draws both crop panels from the same decoded frame as you play, drag, or pinch. Use **Preview edited clip** for the final captions and audio effects.
+- **Live preview** draws both crop panels from the same decoded frame as you play, drag, or pinch. Use **Preview export** for the final captions and audio effects.
 - Previously generated captions and facecam samples are reused within covered ranges during the current app session. A narrower trim uses the existing samples and interpolates the new ends.
 - **Export first** starts the queue with the selected clip. During a batch, **Next** moves it ahead of the remaining clips. Highlight analysis pauses during export and restarts from the unfinished section afterward.
 - Compatible, consecutive sections from the same download can be joined by copying their tracks. Other sections still use the normal rendering path.
 - **Export timings** identifies the encoder and reports setup, render/encode, and save times. Framing and caption effects run in the same pipeline as encoding, so they are reported together.
 
-The editor separates Layout, Crop, Captions, Audio, and Export controls. For a 50/50 vertical clip, turn on **Enhance facecam** in Export to sharpen the upper panel. Use **Edited** to see the sharpening in a draft render. Use 1440p with a high-resolution recording when the crop contains enough source pixels and choose **High detail** to preserve more texture during compression.
+The editor has Trim, Frame, Captions, and Audio tabs. Use the top-bar Export button to open export settings. For a 50/50 vertical clip, turn on **Enhance facecam** under More export settings to sharpen the upper panel. Use **Preview export** to see the sharpening in a draft render. Use 1440p with a high-resolution recording when the crop contains enough source pixels and choose **High detail** to preserve more texture during compression.
