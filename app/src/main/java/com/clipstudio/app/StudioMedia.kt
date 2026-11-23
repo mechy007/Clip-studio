@@ -92,7 +92,7 @@ internal object StudioMedia {
             val rows = csv.substringBeforeLast('\n', "").lineSequence().mapNotNull(::parseSegmentRow).toList()
             for ((index, entry) in rows.withIndex().drop(published.size)) {
                 val tail = index == rows.lastIndex
-                if (tail && !includeTail && entry.endMs - entry.startMs < 36_000L) break
+                if (tail && !includeTail && entry.endMs - entry.startMs < 40_000L) break
                 val file = File(dir, entry.name)
                 if (!YouTubeDownloadValidation.isValidMp4(file)) break
                 val uri = Uri.fromFile(file)
@@ -134,13 +134,16 @@ internal object StudioMedia {
                 val success = transfer.await()
                 val last = if (list.isFile) list.readLines().lastOrNull()?.let(::parseSegmentRow) else null
                 val finished = success && (expectedEnd == 0L || last != null && resumeAtMs + last.endMs >= expectedEnd - 1800)
-                if (finished) publishReady(includeTail = true)
+                publishReady(includeTail = finished)
                 finished && last != null && latestEnd >= resumeAtMs + last.endMs
             }
             check(complete || published.isEmpty() && resumeAtMs == 0L) {
                 "Download interrupted. Use Resume download to keep the completed sections."
             }
             complete && published.isNotEmpty()
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) { runCatching { publishReady() } }
+            throw cancelled
         } finally {
             if (published.isEmpty()) dir.deleteRecursively()
             else dir.listFiles().orEmpty().filter { it.name !in published }.forEach { it.delete() }

@@ -7,7 +7,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
@@ -424,29 +427,29 @@ private fun WaveformTimeline(
             detectTapGestures { point -> onSeek(((point.x / size.width).coerceIn(0f, 1f) * (duration - 1)).toLong()) }
         }
         .pointerInput(duration) {
-            var handle = 0
             fun time(x: Float) = ((x / size.width).coerceIn(0f, 1f) * duration).toLong()
-            detectDragGestures(onDragStart = { position ->
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
                 val (first, last) = currentTrim
-                val at = time(position.x)
+                val at = time(down.position.x)
                 val startDistance = kotlin.math.abs(first - at)
                 val endDistance = kotlin.math.abs(last - at)
                 val reach = 24.dp.toPx() / size.width * duration
-                handle = if (duration < 500 || minOf(startDistance, endDistance) > reach) 0
-                    else if (startDistance <= endDistance) 1 else 2
-            }, onDragEnd = {
-                if (handle != 0) finish()
-                handle = 0
-            }, onDragCancel = {
-                if (handle != 0) finish()
-                handle = 0
-            }) { change, _ ->
-                val (first, last) = currentTrim
-                when (handle) {
-                    1 -> trim(time(change.position.x).coerceIn(0, (last - 500).coerceAtLeast(0)), last)
-                    2 -> trim(first, time(change.position.x).coerceIn((first + 500).coerceAtMost(duration), duration))
+                if (duration < 500 || minOf(startDistance, endDistance) > reach) return@awaitEachGesture
+                val startHandle = startDistance <= endDistance
+                val drag = awaitHorizontalTouchSlopOrCancellation(down.id) { change, _ -> change.consume() }
+                    ?: return@awaitEachGesture
+                fun move(x: Float) {
+                    val (currentStart, currentEnd) = currentTrim
+                    if (startHandle) trim(time(x).coerceIn(0, (currentEnd - 500).coerceAtLeast(0)), currentEnd)
+                    else trim(currentStart, time(x).coerceIn((currentStart + 500).coerceAtMost(duration), duration))
                 }
-                if (handle != 0) change.consume()
+                move(drag.position.x)
+                horizontalDrag(drag.id) { change ->
+                    move(change.position.x)
+                    change.consume()
+                }
+                finish()
             }
         }
     ) {
