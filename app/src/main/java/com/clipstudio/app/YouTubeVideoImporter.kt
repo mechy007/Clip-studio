@@ -12,6 +12,22 @@ import java.io.File
 import java.util.UUID
 
 object YouTubeVideoImporter {
+    @Volatile private var initialized = false
+
+    @Synchronized
+    internal fun prepare(context: Context) {
+        if (initialized) return
+        val app = context.applicationContext
+        YoutubeDL.init(app)
+        FFmpeg.init(app)
+        try {
+            YoutubeDL.updateYoutubeDL(app, YoutubeDL.UpdateChannel._STABLE)
+        } catch (error: Exception) {
+            android.util.Log.w("ClipStudioYouTube", "Using the installed extractor", error)
+        }
+        initialized = true
+    }
+
     suspend fun download(context: Context, url: String, height: Int, onProgress: (Int) -> Unit): Uri =
         runInterruptible(Dispatchers.IO) {
             require(YouTubeLinkClassifier.isYouTubeUrl(url))
@@ -22,21 +38,10 @@ object YouTubeVideoImporter {
             val staging = File(imports, ".$id")
             check(staging.mkdirs()) { "Could not create the download directory." }
             try {
-                YoutubeDL.init(context.applicationContext)
-                FFmpeg.init(context.applicationContext)
-                // Refresh the yt-dlp extractor before using it: the library's bundled
-                // extractor can become stale when YouTube changes its player API.
-                // A network/update failure is not a successful download; the
-                // subsequent extraction and MP4 validation still determine success.
-                try {
-                    YoutubeDL.updateYoutubeDL(context.applicationContext, YoutubeDL.UpdateChannel._STABLE)
-                } catch (updateError: Exception) {
-                    android.util.Log.w("ClipStudioYouTube", "yt-dlp update unavailable; trying installed extractor", updateError)
-                }
+                prepare(context)
                 val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
                     .addOption("--no-playlist")
-                    // Allow active livestreams, but reject broadcasts that have not started.
-                    .addOption("--match-filter", "!is_upcoming")
+                    .addOption("--match-filter", "!is_live & !is_upcoming")
                     .addOption("--socket-timeout", 30)
                     .addOption("--retries", 3)
                     .addOption("--fragment-retries", 3)

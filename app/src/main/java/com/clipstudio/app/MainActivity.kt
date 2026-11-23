@@ -1,254 +1,277 @@
 package com.clipstudio.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.widget.MediaController
-import android.widget.VideoView
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
 import java.util.Locale
+
+private val StudioColors = darkColorScheme(
+    primary = Color(0xFFFF826C), onPrimary = Color(0xFF31110D),
+    secondary = Color(0xFF78EACB), background = Color(0xFF101318),
+    surface = Color(0xFF101318), surfaceVariant = Color(0xFF232A32),
+    onSurface = Color(0xFFF4F2EF), onSurfaceVariant = Color(0xFFBDC6CF),
+    outline = Color(0xFF6F7983)
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        StudioSession.initialize(this)
         enableEdgeToEdge()
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFFF7B967))) {
-                Studio()
-            }
+            MaterialTheme(colorScheme = StudioColors) { Dashboard() }
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
-    private fun Studio() {
-        val scope = rememberCoroutineScope()
-        var link by remember { mutableStateOf("") }
-        var layout by remember { mutableStateOf(Layout.Split) }
-        var parts by remember { mutableStateOf(emptyList<SourcePart>()) }
-        var selected by remember { mutableStateOf<SourcePart?>(null) }
-        var importing by remember { mutableStateOf(false) }
-        var exporting by remember { mutableStateOf(false) }
-        var importStatus by remember { mutableStateOf("") }
-        var exportStatus by remember { mutableStateOf("") }
-        var saved by remember { mutableStateOf<Uri?>(null) }
-
-        fun accept(part: SourcePart) {
-            parts = parts + part
-            if (selected == null) selected = part
+    private fun Dashboard() {
+        val state by StudioSession.state.collectAsState()
+        val project = state.project
+        var link by rememberSaveable { mutableStateOf("") }
+        var incomingLayout by rememberSaveable { mutableStateOf(Layout.Split) }
+        var selectedPart by rememberSaveable { mutableStateOf<String?>(null) }
+        var chosenMoment by rememberSaveable { mutableStateOf(-1L) }
+        var chosenEnd by rememberSaveable { mutableStateOf(-1L) }
+        var momentSelection by rememberSaveable { mutableStateOf(0) }
+        val editorAnchor = remember { BringIntoViewRequester() }
+        var notificationAsked by rememberSaveable { mutableStateOf(false) }
+        val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+        fun showNotificationPermission() {
+            if (!notificationAsked && Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationAsked = true
+                permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
         }
-
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
-                scope.launch {
-                    importing = true
-                    try {
-                        val duration = StudioMedia.duration(this@MainActivity, uri)
-                        parts = emptyList()
-                        selected = null
-                        accept(SourcePart(uri, 0L, duration))
-                        importStatus = "Video ready"
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (failure: Exception) {
-                        importStatus = failure.message ?: "Could not open the selected video."
-                    } finally {
-                        importing = false
+                runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                selectedPart = null
+                chosenMoment = -1L
+                StudioSession.importLocal(this, uri, displayName(uri), incomingLayout)
+                showNotificationPermission()
+            }
+        }
+        val occupied = state.jobs.isNotEmpty()
+        val exporting = Work.EXPORT in state.jobs
+        val selected = project?.parts?.find { it.part.uri.toString() == selectedPart }
+            ?: project?.parts?.firstOrNull()
+        Scaffold { inset ->
+            Column(
+                Modifier.fillMaxSize().padding(inset).verticalScroll(rememberScrollState()).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Image(painterResource(R.drawable.studio_mark), null, Modifier.size(52.dp))
+                    Text("Clip Studio", style = MaterialTheme.typography.headlineMedium)
+                }
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Import a recording", style = MaterialTheme.typography.titleLarge)
+                        OutlinedTextField(
+                            value = link, onValueChange = { link = it }, singleLine = true,
+                            enabled = !occupied, label = { Text("YouTube recording URL") }, modifier = Modifier.fillMaxWidth()
+                        )
+                        Text("Starting layout", style = MaterialTheme.typography.labelLarge)
+                        LayoutPicker(incomingLayout, !occupied) { incomingLayout = it }
+                        Button(
+                            enabled = !occupied && YouTubeLinkClassifier.isYouTubeUrl(link),
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                selectedPart = null
+                                chosenMoment = -1L
+                                StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout)
+                                showNotificationPermission()
+                            }
+                        ) { Text("Import & find highlights") }
+                        OutlinedButton(enabled = !occupied, modifier = Modifier.fillMaxWidth(),
+                            onClick = { picker.launch(arrayOf("video/*")) }) { Text("Open a video from your phone") }
+                    }
+                }
+                if (occupied) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    state.jobs.forEach { (work, label) ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(label, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary)
+                            TextButton(onClick = { StudioSession.cancel(work) }) { Text("Cancel") }
+                        }
+                    }
+                }
+                if (state.status.isNotBlank()) Text(state.status, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (project != null && selected != null) {
+                    Text(project.name, style = MaterialTheme.typography.titleLarge)
+                    if (project.parts.size > 1) {
+                        var expanded by rememberSaveable { mutableStateOf(false) }
+                        TextButton(onClick = { expanded = !expanded }) {
+                            Text("${project.parts.size} ready sections · ${timestamp(selected.part.offsetMs)} selected")
+                        }
+                        if (expanded) project.parts.forEach { review ->
+                            val part = review.part
+                            FilterChip(
+                                selected = review == selected, onClick = {
+                                    chosenMoment = -1L
+                                    selectedPart = part.uri.toString()
+                                },
+                                enabled = !exporting, label = {
+                                    Text("${timestamp(part.offsetMs)} – ${timestamp(part.offsetMs + part.durationMs)}")
+                                }
+                            )
+                        }
+                    }
+                    LayoutPicker(project.layout, !exporting, StudioSession::changeLayout)
+                    if (project.parts.any { it.highlights == null } && Work.ANALYZE !in state.jobs) {
+                        OutlinedButton(onClick = { StudioSession.analyze(this@MainActivity) }) { Text("Find highlights") }
+                    }
+                    val suggestions = project.parts.flatMap { review ->
+                        review.highlights.orEmpty().map { review.part to it }
+                    }.sortedByDescending { it.second.score }.take(10)
+                    if (suggestions.isNotEmpty()) {
+                        Text("Suggested highlights", style = MaterialTheme.typography.titleLarge)
+                        suggestions.forEach { (part, highlight) ->
+                            Card(onClick = {
+                                selectedPart = part.uri.toString()
+                                chosenMoment = highlight.startMs
+                                chosenEnd = highlight.endMs
+                                momentSelection++
+                            }, enabled = !exporting) {
+                                Column(Modifier.fillMaxWidth().padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text("${timestamp(part.offsetMs + highlight.startMs)} – ${timestamp(part.offsetMs + highlight.endMs)}",
+                                        style = MaterialTheme.typography.titleSmall)
+                                    Text(highlight.reason, color = MaterialTheme.colorScheme.secondary)
+                                }
+                            }
+                        }
+                    } else if (project.parts.all { it.highlights != null }) {
+                        Text("No strong highlight signals found. You can still trim a section manually.")
+                    }
+                    Text("Edit clip", Modifier.bringIntoViewRequester(editorAnchor),
+                        style = MaterialTheme.typography.titleLarge)
+                    LaunchedEffect(momentSelection) {
+                        if (momentSelection > 0 && chosenMoment >= 0) editorAnchor.bringIntoView()
+                    }
+                    key(selected.part.uri) {
+                        ClipEditor(selected.part, project.layout, state, chosenMoment, chosenEnd, momentSelection,
+                            ::showNotificationPermission)
+                    }
+                }
+                if (state.queue.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text("Export queue", style = MaterialTheme.typography.titleLarge)
+                    state.queue.forEachIndexed { index, clip ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("${timestamp(clip.part.offsetMs + clip.start)} · ${clip.layout.label}", Modifier.weight(1f))
+                            TextButton(enabled = !exporting, onClick = { StudioSession.removeQueued(index) }) { Text("Remove") }
+                        }
+                    }
+                    Button(
+                        enabled = !exporting,
+                        onClick = {
+                            StudioSession.export(this@MainActivity, state.queue, fromQueue = true)
+                            showNotificationPermission()
+                        }
+                    ) { Text("Export ${state.queue.size} clips") }
+                }
+                if (state.exports.isNotEmpty()) {
+                    Text("${state.exports.size} MP4 ${if (state.exports.size == 1) "ready" else "files ready"}",
+                        style = MaterialTheme.typography.titleMedium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = {
+                            val play = Intent(Intent.ACTION_VIEW).setDataAndType(state.exports.last(), "video/mp4")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            runCatching { startActivity(Intent.createChooser(play, "Open exported clip")) }
+                        }) { Text("Open MP4") }
+                        OutlinedButton(onClick = { share(state.exports) }) {
+                            Text("Share ${if (state.exports.size == 1) "MP4" else "clips"}")
+                        }
                     }
                 }
             }
         }
+    }
 
-        Scaffold { inset ->
-            Column(
-                modifier = Modifier.padding(inset).verticalScroll(rememberScrollState()).padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("Clip Studio", style = MaterialTheme.typography.headlineMedium)
-                OutlinedTextField(
-                    value = link, onValueChange = { link = it }, singleLine = true,
-                    enabled = !importing, label = { Text("YouTube link") }, modifier = Modifier.fillMaxWidth()
-                )
-                Text("Export layout", style = MaterialTheme.typography.titleMedium)
-                listOf(listOf(Layout.Split, Layout.Fill), listOf(Layout.Fit, Layout.Landscape)).forEach { row ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        row.forEach { option ->
-                            FilterChip(selected = layout == option, onClick = { layout = option },
-                                enabled = !importing && !exporting, label = { Text(option.label) })
-                        }
-                    }
-                }
-                Button(
-                    enabled = !importing && !exporting && YouTubeLinkClassifier.isYouTubeUrl(link),
-                    onClick = {
-                        val sourceLink = link.trim()
-                        importing = true
-                        parts = emptyList()
-                        selected = null
-                        importStatus = "Opening YouTube recording…"
-                        scope.launch {
-                            try {
-                                val segmented = try {
-                                    StudioMedia.downloadInParts(this@MainActivity, sourceLink) { part ->
-                                        accept(part)
-                                        importStatus = "Downloading · ${parts.size} sections ready"
-                                    }
-                                } catch (cancelled: CancellationException) {
-                                    throw cancelled
-                                } catch (failure: Exception) {
-                                    if (parts.isNotEmpty()) throw failure
-                                    false
-                                }
-                                if (!segmented) {
-                                    importStatus = "Preparing full-video import…"
-                                    val uri = YouTubeVideoImporter.download(this@MainActivity, sourceLink, 1080) { percent ->
-                                        scope.launch {
-                                            if (importing) importStatus = "Downloading full video · $percent%"
-                                        }
-                                    }
-                                    accept(SourcePart(uri, 0L, StudioMedia.duration(this@MainActivity, uri)))
-                                }
-                                importStatus = "Import complete · ${parts.size} sections ready"
-                            } catch (cancelled: CancellationException) {
-                                throw cancelled
-                            } catch (failure: Exception) {
-                                importStatus = failure.message ?: "Import failed."
-                            } finally {
-                                importing = false
-                            }
-                        }
-                    }
-                ) { Text("Import & clip") }
-                OutlinedButton(enabled = !importing && !exporting, onClick = { picker.launch(arrayOf("video/*")) }) {
-                    Text("Choose a video")
-                }
-                if (importing) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                if (importStatus.isNotBlank()) Text(importStatus)
-                if (parts.size > 1) {
-                    Text("Ready sections", style = MaterialTheme.typography.titleMedium)
-                    parts.forEach { part ->
-                        FilterChip(
-                            selected = part == selected, onClick = { selected = part }, enabled = !exporting,
-                            label = { Text("${timestamp(part.offsetMs)} – ${timestamp(part.offsetMs + part.durationMs)}") }
-                        )
-                    }
-                }
-                selected?.let { part ->
-                    key(part.uri) {
-                        ClipControls(part, layout, exporting) { start, end, camera, game ->
-                            exporting = true
-                            exportStatus = "Rendering clip…"
-                            saved = null
-                            val exportLayout = layout
-                            scope.launch {
-                                try {
-                                    saved = StudioMedia.export(this@MainActivity, part, start, end, exportLayout, camera, game)
-                                    exportStatus = "Saved to Movies/Clip Studio"
-                                } catch (cancelled: CancellationException) {
-                                    throw cancelled
-                                } catch (failure: Exception) {
-                                    exportStatus = failure.message ?: "Export failed."
-                                } finally {
-                                    exporting = false
-                                }
-                            }
-                        }
-                    }
-                }
-                if (exportStatus.isNotBlank()) Text(exportStatus)
-                saved?.let { uri ->
-                    OutlinedButton(onClick = {
-                        val share = Intent(Intent.ACTION_SEND).setType("video/mp4")
-                            .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        startActivity(Intent.createChooser(share, "Share clip"))
-                    }) { Text("Share MP4") }
-                }
+    private fun displayName(uri: Uri): String = runCatching {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { rows ->
+            if (rows.moveToFirst()) rows.getString(0) else null
+        }
+    }.getOrNull() ?: "Imported recording"
+
+    private fun share(uris: List<Uri>) {
+        val intent = if (uris.size == 1) {
+            Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris.single())
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+        }
+        intent.type = "video/mp4"
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(intent, "Share from Clip Studio"))
+    }
+}
+
+@Composable
+private fun LayoutPicker(layout: Layout, enabled: Boolean, select: (Layout) -> Unit) {
+    Layout.entries.chunked(2).forEach { row ->
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            row.forEach { option ->
+                FilterChip(selected = layout == option, onClick = { select(option) },
+                    enabled = enabled, label = { Text(option.label) })
             }
         }
     }
 }
 
-@Composable
-@OptIn(ExperimentalMaterial3Api::class)
-private fun ClipControls(
-    part: SourcePart, layout: Layout, exporting: Boolean,
-    onExport: (Long, Long, Crop, Crop) -> Unit
-) {
-    var trim by remember { mutableStateOf(0f..minOf(30_000L, part.durationMs).toFloat()) }
-    var camera by remember { mutableStateOf(Crop(0.05f, 0.85f, 3f)) }
-    var game by remember { mutableStateOf(Crop(0.5f, 0.5f)) }
-    AndroidView(
-        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-        factory = { context ->
-            VideoView(context).apply {
-                setMediaController(MediaController(context).also { it.setAnchorView(this) })
-                setVideoURI(part.uri)
-                setOnPreparedListener { seekTo(1) }
-            }
-        },
-        onRelease = { it.stopPlayback() }
-    )
-    Text("Trim · ${timestamp(part.offsetMs + trim.start.toLong())} – ${timestamp(part.offsetMs + trim.endInclusive.toLong())}")
-    RangeSlider(
-        value = trim, onValueChange = { trim = it }, enabled = !exporting,
-        valueRange = 0f..part.durationMs.toFloat()
-    )
-    if (layout == Layout.Split) CropControls("Facecam crop", camera, !exporting) { camera = it }
-    if (layout in listOf(Layout.Split, Layout.Fill)) CropControls("Gameplay crop", game, !exporting) { game = it }
-    Button(
-        enabled = !exporting && trim.endInclusive - trim.start >= 500,
-        onClick = { onExport(trim.start.toLong(), trim.endInclusive.toLong().coerceAtMost(part.durationMs), camera, game) }
-    ) { Text(if (exporting) "Rendering…" else "Export MP4") }
-}
-
-@Composable
-private fun CropControls(title: String, crop: Crop, enabled: Boolean, onChange: (Crop) -> Unit) {
-    Text(title, style = MaterialTheme.typography.titleSmall)
-    Text("Horizontal")
-    Slider(crop.x, { onChange(crop.copy(x = it)) }, enabled = enabled)
-    Text("Vertical")
-    Slider(crop.y, { onChange(crop.copy(y = it)) }, enabled = enabled)
-    Text("Zoom")
-    Slider(crop.zoom, { onChange(crop.copy(zoom = it)) }, valueRange = 1f..4f, enabled = enabled)
-}
-
-private fun timestamp(ms: Long): String {
+internal fun timestamp(ms: Long): String {
     val seconds = ms / 1000
     return String.format(Locale.US, "%d:%02d", seconds / 60, seconds % 60)
 }
