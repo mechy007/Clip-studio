@@ -28,6 +28,7 @@ internal data class StudioState(
     val exports: List<Uri> = emptyList(),
     val transcripts: Map<Uri, CaptionMemo> = emptyMap(),
     val library: StudioLibrary = StudioLibrary(),
+    val persistedDrafts: Map<String, Map<Uri, ClipDraft>> = emptyMap(),
     val joined: SourcePart? = null,
     val joinRevision: Long = 0,
     val guidedPart: SourcePart? = null,
@@ -82,6 +83,7 @@ internal object StudioSession {
                 update { it.copy(storageWarning = "Saved projects could not be opened. Existing files were kept. Reopen Clip Studio to retry.") }
                 return@launch
             }
+            update { it.copy(persistedDrafts = recovered.projects.associate { project -> project.id to project.drafts }) }
             val ongoing = state.value
             if (ongoing.project == null) {
                 val project = recovered.projects.firstOrNull { it.id == recovered.currentId } ?: recovered.projects.firstOrNull()
@@ -97,6 +99,7 @@ internal object StudioSession {
             for (library in saves) {
                 try {
                     withContext(Dispatchers.IO) { store.save(library) }
+                    update { it.copy(persistedDrafts = library.projects.associate { project -> project.id to project.drafts }) }
                 } catch (_: java.io.IOException) {
                     update { it.copy(status = "Could not save the project. You can still export clips.") }
                 }
@@ -229,10 +232,14 @@ internal object StudioSession {
     fun captions(
         context: Context, part: SourcePart, start: Long, end: Long, language: String?, audioTrack: Int
     ) = work(context, Work.CAPTIONS, "Generating captions from audio track ${audioTrack + 1}") { app ->
-        val projectId = state.value.project?.id
+        val projectId = state.value.project?.id ?: return@work
         val cached = captionMemos.lastOrNull { it.covers(part, start, end, language, audioTrack) }
         val memo = cached ?: CaptionMemo(part, start, end, language,
             StudioAnalysis.captions(app, part, start, end, language, audioTrack), audioTrack).also(::rememberCaptions)
+        updateProject(projectId) { owner ->
+            val draft = owner.drafts[part.uri] ?: return@updateProject owner
+            owner.copy(drafts = owner.drafts + (part.uri to draft.copy(transcript = memo)))
+        }
         if (projectId != state.value.project?.id) return@work
         update {
             val recent = (it.transcripts - part.uri + (part.uri to memo)).toList().takeLast(24).toMap()
@@ -314,8 +321,11 @@ internal object StudioSession {
         val project = state.value.library.projects.firstOrNull { it.id == projectId } ?: return
         val uri = draft.edit.part.uri
         val saved = project.drafts[uri]
-        if ((!create && saved == null) || saved == draft || project.parts.none { it.part.uri == uri }) return
-        updateProject(projectId) { it.copy(drafts = it.drafts + (uri to draft)) }
+        if ((!create && saved == null) || project.parts.none { it.part.uri == uri }) return
+        val activeMemo = state.value.transcripts[uri].takeIf { state.value.project?.id == projectId }
+        val updated = draft.copy(transcript = activeMemo ?: saved?.transcript ?: draft.transcript)
+        if (saved == updated) return
+        updateProject(projectId) { it.copy(drafts = it.drafts + (uri to updated)) }
     }
 
     fun editTranscript(uri: Uri, index: Int, text: String) {

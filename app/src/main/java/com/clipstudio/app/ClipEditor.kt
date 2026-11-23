@@ -367,7 +367,7 @@ internal fun ClipEditor(
                 Text("Trim clip", style = MaterialTheme.typography.titleMedium)
                 Text("${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}",
                     style = MaterialTheme.typography.bodyMedium)
-                if (project.drafts[part.uri] == draft) {
+                if (state.persistedDrafts[project.id]?.get(part.uri) == draft) {
                     Text("Draft saved", style = MaterialTheme.typography.labelSmall)
                 }
                 RangeSlider(
@@ -549,6 +549,7 @@ internal fun ClipEditor(
                     trackMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(enabled = canCaption && streamerTrack in 0 until trackCount, onClick = {
+                            StudioSession.saveDraft(project.id, draft, create = true)
                             StudioSession.captions(context, part, start, end, language, streamerTrack)
                             notify()
                         }) { Text("Generate captions") }
