@@ -121,7 +121,7 @@ internal object StudioMedia {
                 val success = transfer.await()
                 val last = if (list.isFile) list.readLines().lastOrNull()?.let(::parseSegmentRow) else null
                 val finished = success && (expectedEnd == 0L || last != null && resumeAtMs + last.endMs >= expectedEnd - 1800)
-                publishReady(includeTail = finished)
+                if (finished) publishReady(includeTail = true)
                 finished
             }
             check(complete || count == 0 && resumeAtMs == 0L) {
@@ -235,7 +235,7 @@ internal object StudioMedia {
                 "measure_perchannel=none:measure_overall=Peak_level," +
                 "ametadata=print:key=lavfi.astats.Overall.Peak_level:file=${data.absolutePath}"
             val success = runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-i", input(context, part.uri),
-                "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-af", "aresample=16000,$filter", "-f", "null", "-"))
+                "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-af", "aresample=16000,asetpts=N/SR/TB,$filter", "-f", "null", "-"))
             if (!success) emptyList() else data.useLines { lines ->
                 lines.filter { it.startsWith("lavfi.astats.Overall.Peak_level=") }.take(160).map { row ->
                     val db = row.substringAfter('=').toFloatOrNull() ?: -60f

@@ -12,7 +12,7 @@ Clip Studio is an Android-only editor for turning recorded videos into short cli
 
 Compatible YouTube recordings yield independently playable sections as the source arrives. Sections can be analyzed, trimmed, and exported while the download continues. A recording without a compatible progressive format can use the full-file importer. Adjacent ready sections can be joined for clips that cross a boundary. YouTube availability varies by recording.
 
-Grant notification permission to see import, analysis, and export progress outside the app. The latest imported project, completed sections, and highlight suggestions can be reopened after a restart. Compatible progressive YouTube transfers can resume from a saved section boundary. Queued clips and their selected caption styles are restored with the project. Unqueued caption edits are kept during the current app session. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
+Grant notification permission to see import, analysis, and export progress outside the app. Saved projects, completed sections, highlight suggestions, and finished clip links can be reopened after a restart. Compatible progressive YouTube transfers can resume from a saved section boundary. Queued clips and their selected caption styles are restored with the project. Unqueued caption edits are kept during the current app session. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
 
 ## Build
 

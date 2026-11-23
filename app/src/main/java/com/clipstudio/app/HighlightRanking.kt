@@ -66,7 +66,26 @@ internal fun rankHighlights(
             else -> clipDuration / 3
         }
         val start = (time - lead).coerceIn(0, durationMs - clipDuration)
-        Highlight(start, start + clipDuration, score, reason)
+        val end = start + clipDuration
+        fun active(at: Long): Boolean {
+            val signal = reactionBySecond[at]
+            val reaction = signal?.let { maxOf(it.laughter, it.shouting, it.cheering) } ?: 0f
+            val speaking = (signal?.speech ?: 0f) >= .30f
+            val moving = (visualBySecond[at]?.change ?: 0f) >= maxOf(.20f, typicalMotion * 1.25f)
+            return when (mode) {
+                HighlightMode.FUNNY -> reaction >= .24f
+                HighlightMode.GAMEPLAY -> moving
+                HighlightMode.TALKING -> speaking
+                HighlightMode.BALANCED -> reaction >= .28f || speaking || moving
+            }
+        }
+        val setup = if (active(start / 1000) && active(start / 1000 - 1)) {
+            (start - 2_000L).coerceAtLeast(0L)
+        } else start
+        val payoff = if (active((end - 1) / 1000) && active(end / 1000)) {
+            (end + 2_000L).coerceAtMost(durationMs)
+        } else end
+        Highlight(setup, payoff, score, reason)
     }
     val selected = mutableListOf<Highlight>()
     for (candidate in candidates.sortedWith(compareByDescending<Highlight> { it.score }.thenBy { it.startMs })) {

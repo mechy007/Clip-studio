@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
@@ -253,11 +254,18 @@ internal fun ClipEditor(
     val waveformData = waveform
     if (waveformData == null) Text("Reading audio waveform…", style = MaterialTheme.typography.bodySmall)
     else if (waveformData.isNotEmpty()) {
-        WaveformTimeline(waveformData, part.durationMs, start, end, frameAt) { time ->
+        WaveformTimeline(waveformData, part.durationMs, start, end, frameAt, seek = { time ->
             playing = false
             showPreview = false
             frameAt = time
-        }
+        }, onTrim = { first, last ->
+            start = first
+            end = last
+        }, onTrimFinished = {
+            playing = false
+            showPreview = false
+            frameAt = start
+        })
     }
     var scrub by remember(frameAt) { mutableStateOf(frameAt.toFloat()) }
     Text("Playhead · ${timestamp(part.offsetMs + scrub.toLong())}", style = MaterialTheme.typography.bodySmall)
@@ -401,15 +409,47 @@ private fun FramingSliders(title: String, crop: Crop, onChange: (Crop) -> Unit) 
 
 @Composable
 private fun WaveformTimeline(
-    samples: List<Float>, duration: Long, start: Long, end: Long, cursor: Long, seek: (Long) -> Unit
+    samples: List<Float>, duration: Long, start: Long, end: Long, cursor: Long, seek: (Long) -> Unit,
+    onTrim: (Long, Long) -> Unit, onTrimFinished: () -> Unit
 ) {
     val primary = MaterialTheme.colorScheme.primary
     val inactive = MaterialTheme.colorScheme.outline
     val playhead = MaterialTheme.colorScheme.secondary
     val onSeek by rememberUpdatedState(seek)
-    Canvas(Modifier.fillMaxWidth().height(52.dp).pointerInput(duration) {
-        detectTapGestures { point -> onSeek(((point.x / size.width).coerceIn(0f, 1f) * (duration - 1)).toLong()) }
-    }) {
+    val currentTrim by rememberUpdatedState(start to end)
+    val trim by rememberUpdatedState(onTrim)
+    val finish by rememberUpdatedState(onTrimFinished)
+    Canvas(Modifier.fillMaxWidth().height(52.dp)
+        .pointerInput(duration) {
+            detectTapGestures { point -> onSeek(((point.x / size.width).coerceIn(0f, 1f) * (duration - 1)).toLong()) }
+        }
+        .pointerInput(duration) {
+            var handle = 0
+            fun time(x: Float) = ((x / size.width).coerceIn(0f, 1f) * duration).toLong()
+            detectDragGestures(onDragStart = { position ->
+                val (first, last) = currentTrim
+                val at = time(position.x)
+                val startDistance = kotlin.math.abs(first - at)
+                val endDistance = kotlin.math.abs(last - at)
+                val reach = 24.dp.toPx() / size.width * duration
+                handle = if (duration < 500 || minOf(startDistance, endDistance) > reach) 0
+                    else if (startDistance <= endDistance) 1 else 2
+            }, onDragEnd = {
+                if (handle != 0) finish()
+                handle = 0
+            }, onDragCancel = {
+                if (handle != 0) finish()
+                handle = 0
+            }) { change, _ ->
+                val (first, last) = currentTrim
+                when (handle) {
+                    1 -> trim(time(change.position.x).coerceIn(0, (last - 500).coerceAtLeast(0)), last)
+                    2 -> trim(first, time(change.position.x).coerceIn((first + 500).coerceAtMost(duration), duration))
+                }
+                if (handle != 0) change.consume()
+            }
+        }
+    ) {
         val step = size.width / samples.size
         samples.forEachIndexed { index, peak ->
             val time = (index + .5f) / samples.size * duration
@@ -417,6 +457,10 @@ private fun WaveformTimeline(
             val x = (index + .5f) * step
             drawLine(if (time >= start && time <= end) primary else inactive,
                 Offset(x, size.height / 2 - bar), Offset(x, size.height / 2 + bar), strokeWidth = maxOf(1f, step * .65f))
+        }
+        listOf(start, end).forEach {
+            val handle = (it.toFloat() / duration * size.width).coerceIn(2.dp.toPx(), size.width - 2.dp.toPx())
+            drawLine(primary, Offset(handle, 0f), Offset(handle, size.height), strokeWidth = 3.dp.toPx())
         }
         val x = cursor.toFloat() / duration * size.width
         drawLine(playhead, Offset(x, 0f), Offset(x, size.height), strokeWidth = 2.dp.toPx())
