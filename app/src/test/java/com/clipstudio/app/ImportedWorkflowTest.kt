@@ -6,6 +6,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImportedWorkflowTest {
+    @Test fun parsesOptionalRecordingTimestampsWithoutOverflow() {
+        assertEquals(0L, recordingStartMs(""))
+        assertEquals(5_040_000L, recordingStartMs("1:24:00"))
+        assertEquals(5_040_000L, recordingStartMs("84:00"))
+        assertEquals(42_000L, recordingStartMs("42"))
+        assertEquals(null, recordingStartMs("1:60:00"))
+        assertEquals(null, recordingStartMs("1::20"))
+        assertEquals(null, recordingStartMs("-20"))
+        assertEquals(null, recordingStartMs("9223372036854775807"))
+    }
+
     @Test fun guidedRecordingStartsAtTheLastCompletedBoundary() {
         val duration = 75 * 60_000L
         val first = requireNotNull(nextRecordingPart(0, duration))

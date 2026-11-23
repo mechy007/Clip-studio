@@ -41,6 +41,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -63,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
@@ -82,33 +84,40 @@ private enum class EditorTool(val label: String) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun ClipEditor(
-    part: SourcePart, layout: Layout, state: StudioState, suggestedStart: Long, suggestedEnd: Long,
+    part: SourcePart, project: StudioProject, state: StudioState, suggestedStart: Long, suggestedEnd: Long,
     momentSelection: Int, exportRequest: Int, notify: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val suggested = suggestedStart in 0 until suggestedEnd && suggestedEnd <= part.durationMs
-    var start by rememberSaveable { mutableStateOf(if (suggested) suggestedStart else 0L) }
-    var end by rememberSaveable { mutableStateOf(if (suggested) suggestedEnd else minOf(30_000L, part.durationMs)) }
-    var camera by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(CameraDefault) }
-    var gameplay by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(GameplayDefault) }
-    var width by rememberSaveable { mutableStateOf(1080) }
-    var mute by rememberSaveable { mutableStateOf(false) }
+    val savedDraft = remember { project.drafts[part.uri] }
+    val savedEdit = savedDraft?.edit
+    var layout by rememberSaveable { mutableStateOf(savedEdit?.layout ?: project.layout) }
+    fun selectLayout(value: Layout) {
+        layout = value
+        StudioSession.changeLayout(value)
+    }
+    var start by rememberSaveable { mutableStateOf(if (suggested) suggestedStart else savedEdit?.start ?: 0L) }
+    var end by rememberSaveable { mutableStateOf(if (suggested) suggestedEnd else savedEdit?.end ?: minOf(30_000L, part.durationMs)) }
+    var camera by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(savedEdit?.camera ?: CameraDefault) }
+    var gameplay by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(savedEdit?.gameplay ?: GameplayDefault) }
+    var width by rememberSaveable { mutableStateOf(savedEdit?.width ?: 1080) }
+    var mute by rememberSaveable { mutableStateOf(savedEdit?.muted ?: false) }
     var lockCamera by rememberSaveable { mutableStateOf(false) }
     var lockGame by rememberSaveable { mutableStateOf(false) }
     var showPreview by rememberSaveable { mutableStateOf(false) }
     var live by rememberSaveable { mutableStateOf(false) }
-    var fast by rememberSaveable { mutableStateOf(true) }
-    var enhanceFacecam by rememberSaveable { mutableStateOf(false) }
-    var highDetail by rememberSaveable { mutableStateOf(false) }
+    var fast by rememberSaveable { mutableStateOf(savedEdit?.fastExport ?: true) }
+    var enhanceFacecam by rememberSaveable { mutableStateOf(savedEdit?.enhanceFacecam ?: false) }
+    var highDetail by rememberSaveable { mutableStateOf(savedEdit?.highDetail ?: false) }
     var originalSize by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var sourceSize by remember { mutableStateOf(0 to 0) }
-    var trackingOn by rememberSaveable { mutableStateOf(false) }
-    var normalize by rememberSaveable { mutableStateOf(false) }
-    var fades by rememberSaveable { mutableStateOf(false) }
-    var mix by rememberSaveable { mutableStateOf(false) }
-    var voiceLevel by rememberSaveable { mutableStateOf(1f) }
-    var gameLevel by rememberSaveable { mutableStateOf(.6f) }
+    var trackingOn by rememberSaveable { mutableStateOf(savedEdit?.facePath?.isNotEmpty() == true) }
+    var normalize by rememberSaveable { mutableStateOf(savedEdit?.audio?.normalize ?: false) }
+    var fades by rememberSaveable { mutableStateOf(savedEdit?.audio?.fade ?: false) }
+    var mix by rememberSaveable { mutableStateOf(savedEdit?.audio?.mixTracks ?: false) }
+    var voiceLevel by rememberSaveable { mutableStateOf(savedEdit?.audio?.voice ?: 1f) }
+    var gameLevel by rememberSaveable { mutableStateOf(savedEdit?.audio?.game ?: .6f) }
     var presetName by rememberSaveable { mutableStateOf("") }
     var savingPreset by rememberSaveable { mutableStateOf(false) }
     var showingPresets by rememberSaveable { mutableStateOf(false) }
@@ -119,15 +128,17 @@ internal fun ClipEditor(
     var preciseTrim by rememberSaveable { mutableStateOf(false) }
     var captionAppearance by rememberSaveable { mutableStateOf(false) }
     var exportOptions by rememberSaveable { mutableStateOf(false) }
-    var preset by rememberSaveable { mutableStateOf(CaptionPreset.KARAOKE) }
-    var captionPosition by rememberSaveable { mutableStateOf(CaptionPosition.LOWER) }
-    var captionSize by rememberSaveable { mutableStateOf(100) }
-    var customCaptions by rememberSaveable { mutableStateOf(false) }
-    var customText by rememberSaveable { mutableStateOf("") }
-    var streamerTrack by rememberSaveable { mutableStateOf(0) }
-    var captionEnabled by rememberSaveable { mutableStateOf(true) }
+    var preset by rememberSaveable { mutableStateOf(savedEdit?.preset ?: CaptionPreset.KARAOKE) }
+    var captionPosition by rememberSaveable { mutableStateOf(savedEdit?.captionPosition ?: CaptionPosition.LOWER) }
+    var captionSize by rememberSaveable { mutableStateOf(savedEdit?.captionSize ?: 100) }
+    var customCaptions by rememberSaveable { mutableStateOf(savedDraft?.customCaptions ?: false) }
+    var customText by rememberSaveable { mutableStateOf(savedDraft?.customText.orEmpty()) }
+    var streamerTrack by rememberSaveable { mutableStateOf(savedDraft?.audioTrack ?: 0) }
+    var captionEnabled by rememberSaveable { mutableStateOf(savedDraft?.captionEnabled ?: true) }
     var editCaptions by rememberSaveable { mutableStateOf(false) }
-    var languageIndex by rememberSaveable { mutableStateOf(0) }
+    var languageIndex by rememberSaveable {
+        mutableStateOf(Languages.indexOfFirst { it.second == savedDraft?.language }.coerceAtLeast(0))
+    }
     var tool by rememberSaveable { mutableStateOf(EditorTool.Trim) }
     var handledExportRequest by rememberSaveable { mutableStateOf(0) }
     val toolAnchor = remember { BringIntoViewRequester() }
@@ -158,7 +169,13 @@ internal fun ClipEditor(
         appliedSelection = momentSelection
     }
     val busy = Work.EXPORT in state.jobs
-    val tracking = state.tracking.lastOrNull { it.part == part && it.camera == camera && it.start <= start && it.end >= end }
+    val draftTracking = remember {
+        savedEdit?.takeIf { it.facePath.isNotEmpty() }
+            ?.let { TrackingMemo(part, it.start, it.end, it.camera, it.facePath) }
+    }
+    val tracking = (listOfNotNull(draftTracking) + state.tracking).lastOrNull {
+        it.part == part && it.camera == camera && it.start <= start && it.end >= end
+    }
     val facePath = remember(trackingOn, tracking, start, end, layout) {
         if (trackingOn && tracking != null && layout == Layout.Split) {
             rebaseTracking(tracking.path, start - tracking.start, end - tracking.start)
@@ -170,6 +187,7 @@ internal fun ClipEditor(
         }
     }
     LaunchedEffect(part.uri) {
+        savedDraft?.transcript?.let { StudioSession.restoreDraftTranscript(project.id, it) }
         audioTracks = withContext(Dispatchers.IO) { StudioMedia.audioTrackCount(context, part.uri) }
         waveform = try {
             StudioMedia.waveform(context, part)
@@ -178,7 +196,8 @@ internal fun ClipEditor(
     }
     val trackCount = audioTracks ?: 0
     val language = Languages[languageIndex].second
-    val transcript = state.transcripts[part.uri]?.takeIf {
+    val captionMemo = state.transcripts[part.uri] ?: savedDraft?.transcript
+    val transcript = captionMemo?.takeIf {
         it.audioTrack == streamerTrack && it.language == language
     }?.words.orEmpty()
     val activeCues = remember(transcript, start, end, customCaptions, customText) {
@@ -194,6 +213,23 @@ internal fun ClipEditor(
         preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail, enhanceFacecam = layout == Layout.Split && enhanceFacecam,
         captionPosition = captionPosition, captionSize = captionSize
     )
+    val draft = ClipDraft(
+        clip().copy(captions = emptyList(), audio = AudioFinish(normalize, fades, mix, voiceLevel, gameLevel),
+            enhanceFacecam = enhanceFacecam),
+        captionEnabled, customCaptions, customText, streamerTrack, language, captionMemo
+    )
+    val initialDraft = remember { draft }
+    val latestDraft by rememberUpdatedState(draft)
+    val saveOnExit by rememberUpdatedState(suggested || draft != initialDraft)
+    LaunchedEffect(draft) {
+        delay(350)
+        StudioSession.saveDraft(project.id, draft, suggested || draft != initialDraft)
+    }
+    DisposableEffect(project.id, part.uri) {
+        onDispose {
+            StudioSession.saveDraft(project.id, latestDraft, saveOnExit)
+        }
+    }
     val generatingCaptions = Work.CAPTIONS in state.jobs
     val waitingForCaptions = captionEnabled && !customCaptions && generatingCaptions
     val canRenderEdit = !busy && !waitingForCaptions && end - start >= 500L
@@ -331,6 +367,9 @@ internal fun ClipEditor(
                 Text("Trim clip", style = MaterialTheme.typography.titleMedium)
                 Text("${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}",
                     style = MaterialTheme.typography.bodyMedium)
+                if (project.drafts[part.uri] == draft) {
+                    Text("Draft saved", style = MaterialTheme.typography.labelSmall)
+                }
                 RangeSlider(
                     value = start.toFloat()..end.toFloat(), onValueChange = {
                         start = it.start.toLong()
@@ -369,11 +408,11 @@ internal fun ClipEditor(
             }
             EditorTool.Layout, EditorTool.Crop -> {
                 Text("Output layout", style = MaterialTheme.typography.titleMedium)
-                LayoutPicker(layout, !busy, StudioSession::changeLayout)
+                LayoutPicker(layout, !busy, ::selectLayout)
                 SettingsDisclosure("Creator presets", showingPresets, { showingPresets = !showingPresets }) {
                     state.library.presets.forEach { saved ->
                         OutlinedButton(onClick = {
-                            StudioSession.changeLayout(saved.layout)
+                            selectLayout(saved.layout)
                             if (!lockCamera) camera = saved.camera
                             if (!lockGame) gameplay = saved.game
                             width = saved.width

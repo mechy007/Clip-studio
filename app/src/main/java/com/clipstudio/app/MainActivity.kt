@@ -104,6 +104,8 @@ class MainActivity : ComponentActivity() {
         val pages = rememberSaveableStateHolder()
         var link by rememberSaveable { mutableStateOf("") }
         var guidedImport by rememberSaveable { mutableStateOf(false) }
+        var recordingStart by rememberSaveable { mutableStateOf("") }
+        val startMs = recordingStartMs(recordingStart)
         var seenGuidedPart by rememberSaveable { mutableStateOf<String?>(null) }
         var nextPartDialog by rememberSaveable { mutableStateOf(false) }
         var seenGuidedExport by remember { mutableStateOf(state.guidedExportRevision) }
@@ -277,15 +279,24 @@ class MainActivity : ComponentActivity() {
                                     )
                                     FilterChip(selected = guidedImport, enabled = !occupied,
                                         onClick = { guidedImport = !guidedImport }, label = { Text("30-minute parts") })
-                                    if (guidedImport) Text("Download one part at a time. Works with finished livestream replays.",
-                                        style = MaterialTheme.typography.bodySmall)
+                                    if (guidedImport) {
+                                        OutlinedTextField(
+                                            value = recordingStart, onValueChange = { recordingStart = it.take(16) },
+                                            enabled = !occupied, singleLine = true, isError = startMs == null,
+                                            label = { Text("Start time (optional)") },
+                                            supportingText = { Text(if (startMs == null) "Use seconds, MM:SS, or HH:MM:SS."
+                                                else "Blank starts at the beginning. Example: 1:24:00") },
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
                                     Button(
-                                        enabled = !occupied && YouTubeLinkClassifier.isYouTubeUrl(link),
+                                        enabled = !occupied && YouTubeLinkClassifier.isYouTubeUrl(link) && (!guidedImport || startMs != null),
                                         modifier = Modifier.fillMaxWidth(),
                                         onClick = {
                                             selectedPart = null
                                             chosenMoment = -1L
-                                            StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout, guidedImport)
+                                            StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout, guidedImport,
+                                                if (guidedImport) startMs ?: 0L else 0L)
                                             showNotificationPermission()
                                         }
                                     ) { Text(if (guidedImport) "Download part 1" else "Import & find highlights") }
@@ -402,7 +413,7 @@ class MainActivity : ComponentActivity() {
                                 }) { Text("Edit across next section") }
                             }
                             key(project.id, selected.part.uri) {
-                                ClipEditor(selected.part, project.layout, state, chosenMoment, chosenEnd, momentSelection,
+                                ClipEditor(selected.part, project, state, chosenMoment, chosenEnd, momentSelection,
                                     exportRequest, ::showNotificationPermission)
                             }
                         }
