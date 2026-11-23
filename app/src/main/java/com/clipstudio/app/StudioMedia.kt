@@ -263,7 +263,7 @@ internal object StudioMedia {
             }
             val (frameWidth, frameHeight) = layout.dimensions(width)
             val filter = if (clip.originalFraming) "[0:v]pad=ceil(iw/2)*2:ceil(ih/2)*2[out]"
-                else videoFilter(layout, camera, gameplay, width, clip.facePath)
+                else videoFilter(layout, camera, gameplay, width, clip.facePath, clip.enhanceFacecam)
             val renderFilter = if (subtitle == null) filter else {
                 subtitle.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight))
                 "$filter;[out]subtitles=filename='${subtitle.absolutePath}':fontsdir=/system/fonts[captioned]"
@@ -280,6 +280,7 @@ internal object StudioMedia {
             fun arguments(codec: List<String>, pixels: String): Array<String> {
                 val rate = if (clip.originalFraming) emptyList() else listOf("-r", "30")
                 val bitrate = when {
+                    !preview && !clip.originalFraming && width == 1440 -> if (clip.highDetail) "16000k" else "12000k"
                     !preview && !clip.originalFraming && clip.highDetail -> if (width == 1080) "8500k" else "4500k"
                     width == 1080 || clip.originalFraming -> "4500k"
                     else -> "2600k"

@@ -8,7 +8,7 @@ Clip Studio is an Android-only editor for turning recorded videos into short cli
 2. Review ready sections and suggested highlights. The phone looks for relative loudness, laughter, shouting, cheering, and visual activity. Suggestions describe the signal that triggered them.
 3. Trim the clip and choose a layout. The 50/50 layout puts the facecam above gameplay. Vertical fill, vertical fit, square, and landscape are also available. Drag or pinch each panel on the framing preview. Use Play source to review the original recording.
 4. Generate offline captions in auto-detect mode or a selected language, edit their text, and choose Clean, Karaoke, or Pop. Save an SRT file for an external editor when needed.
-5. Export one MP4 or queue up to ten. Choose 720p or 1080p, with optional muting. Files go to `Movies/Clip Studio` and can be shared from the app.
+5. Export one MP4 or queue up to ten. Choose 720p, 1080p, or 1440p, with optional muting. Files go to `Movies/Clip Studio` and can be shared from the app.
 
 Compatible YouTube recordings yield independently playable sections as the source arrives. Sections can be analyzed, trimmed, and exported while the download continues. A recording without a compatible progressive format can use the full-file importer. Adjacent ready sections can be joined for clips that cross a boundary. YouTube availability varies by recording.
 
@@ -44,9 +44,11 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and models
 
 ## Faster editing and exports
 
-- **Fast Export** checks for hardware H.264 at the requested 720p or 1080p size and 30 fps. It uses the same layout, tracking, caption and audio filters, and retries in software if the hardware attempt fails. **Quick trim** keeps source framing and audio, copying compatible tracks when the start aligns with a sync frame and using an accurate render otherwise.
+- **Fast Export** checks for hardware H.264 at the requested 720p, 1080p, or 1440p size and 30 fps. It uses the same layout, tracking, caption and audio filters, and retries in software if the hardware attempt fails. **Quick trim** keeps source framing and audio, copying compatible tracks when the start aligns with a sync frame and using an accurate render otherwise.
 - **Live preview** draws both crop panels from the same decoded frame as you play, drag, or pinch. Use **Preview edited clip** for the final captions and audio effects.
 - Previously generated captions and facecam samples are reused within covered ranges during the current app session. A narrower trim uses the existing samples and interpolates the new ends.
 - **Export first** starts the queue with the selected clip. During a batch, **Next** moves it ahead of the remaining clips. Highlight analysis pauses during export and restarts from the unfinished section afterward.
 - Compatible, consecutive sections from the same download can be joined by copying their tracks. Other sections still use the normal rendering path.
 - **Export timings** identifies the encoder and reports setup, render/encode, and save times. Framing and caption effects run in the same pipeline as encoding, so they are reported together.
+
+The editor separates Layout, Crop, Captions, Audio, and Export controls. For a 50/50 vertical clip, turn on **Enhance facecam** in Export to sharpen the upper panel. Use **Edited** to see the sharpening in a draft render. Use 1440p with a high-resolution recording when the crop contains enough source pixels and choose **High detail** to preserve more texture during compression.

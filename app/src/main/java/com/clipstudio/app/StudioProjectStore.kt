@@ -167,6 +167,7 @@ internal class StudioProjectStore(context: Context) {
             .put("layout", layout.name).put("camera", camera.json()).put("gameplay", gameplay.json())
             .put("width", width).put("muted", muted).put("preset", preset.name).put("captions", rows)
             .put("audio", audio.json()).put("fast", fastExport).put("original", originalFraming).put("detail", highDetail)
+            .put("enhanceFacecam", enhanceFacecam)
             .put("tracking", JSONArray(facePath.map { JSONArray(listOf(it.timeMs, it.x.toDouble(), it.y.toDouble())) }))
     }
 
@@ -192,6 +193,7 @@ internal class StudioProjectStore(context: Context) {
         }
         return ExportClip(part, getLong("start"), getLong("end"), Layout.valueOf(getString("layout")),
             getJSONArray("camera").crop(), getJSONArray("gameplay").crop(), getInt("width"), getBoolean("muted"),
-            captions, CaptionPreset.valueOf(getString("preset")), audio(), path, optBoolean("fast"), optBoolean("original"), optBoolean("detail"))
+            captions, CaptionPreset.valueOf(getString("preset")), audio(), path, optBoolean("fast"), optBoolean("original"),
+            optBoolean("detail"), optBoolean("enhanceFacecam"))
     }
 }
