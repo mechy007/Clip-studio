@@ -16,7 +16,7 @@ internal object StudioAnalysis {
     private const val CHUNK_SAMPLES = SAMPLE_RATE * 30
     const val MAX_CAPTION_DURATION_MS = 120_000L
 
-    suspend fun highlights(context: Context, part: SourcePart): List<Highlight> = withContext(Dispatchers.IO) {
+    suspend fun highlights(context: Context, part: SourcePart, mode: HighlightMode): List<Highlight> = withContext(Dispatchers.IO) {
         val pcm = File.createTempFile("studio-signals-", ".pcm", context.cacheDir)
         try {
             val visual = try {
@@ -28,7 +28,7 @@ internal object StudioAnalysis {
             val hasAudio = StudioMedia.decodeAudio(context, part, pcm, 0, part.durationMs)
             val energy = if (hasAudio) readEnergy(pcm) else emptyList()
             val reactions = if (hasAudio) AudioEventClassifier.analyze(context, pcm) else emptyList()
-            rankHighlights(part.durationMs, energy, reactions, visual)
+            rankHighlights(part.durationMs, energy, reactions, visual, mode = mode)
         } finally {
             pcm.delete()
         }

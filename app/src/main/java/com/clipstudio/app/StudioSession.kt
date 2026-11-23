@@ -15,15 +15,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
-internal enum class Work { IMPORT, ANALYZE, CAPTIONS, EXPORT }
+internal enum class Work { IMPORT, ANALYZE, CAPTIONS, EXPORT, JOIN, PREVIEW }
 
 internal data class StudioState(
     val project: StudioProject? = null,
     val jobs: Map<Work, String> = emptyMap(),
     val status: String = "",
     val exports: List<Uri> = emptyList(),
-    val transcripts: Map<Uri, List<TranscriptSegment>> = emptyMap()
+    val transcripts: Map<Uri, List<TranscriptSegment>> = emptyMap(),
+    val library: StudioLibrary = StudioLibrary(),
+    val joined: SourcePart? = null,
+    val playback: Pair<ExportClip, Uri>? = null
 ) {
     val queue: List<ExportClip> get() = project?.queue.orEmpty()
 }
@@ -32,7 +36,8 @@ internal data class ExportClip(
     val part: SourcePart, val start: Long, val end: Long,
     val layout: Layout, val camera: Crop, val gameplay: Crop,
     val width: Int, val muted: Boolean, val captions: List<CaptionCue> = emptyList(),
-    val preset: CaptionPreset = CaptionPreset.KARAOKE
+    val preset: CaptionPreset = CaptionPreset.KARAOKE,
+    val audio: AudioFinish = AudioFinish(), val facePath: List<FacePoint> = emptyList()
 )
 
 internal object StudioSession {
@@ -40,7 +45,7 @@ internal object StudioSession {
     private val stateFlow = MutableStateFlow(StudioState())
     val state = stateFlow.asStateFlow()
     private val jobs = mutableMapOf<Work, Job>()
-    private val saves = Channel<StudioProject>(Channel.CONFLATED)
+    private val saves = Channel<StudioLibrary>(Channel.CONFLATED)
     private var initialized = false
     private var autoAnalyze = true
 
@@ -51,12 +56,21 @@ internal object StudioSession {
         scope.launch {
             val store = StudioProjectStore(app)
             val recovered = withContext(Dispatchers.IO) { store.load() }
-            if (state.value.project == null && recovered != null) {
-                update { it.copy(project = recovered, status = "Last project restored") }
+            val ongoing = state.value
+            if (ongoing.project == null) {
+                val project = recovered.projects.firstOrNull { it.id == recovered.currentId } ?: recovered.projects.firstOrNull()
+                update { it.copy(project = project, library = recovered, exports = project?.exports.orEmpty()) }
+            } else {
+                val merged = ongoing.library.copy(
+                    projects = (ongoing.library.projects + recovered.projects).distinctBy { it.id },
+                    presets = (ongoing.library.presets + recovered.presets).distinctBy { it.name }
+                )
+                update { it.copy(library = merged) }
+                saves.trySend(merged)
             }
-            for (project in saves) {
+            for (library in saves) {
                 try {
-                    withContext(Dispatchers.IO) { store.save(project) }
+                    withContext(Dispatchers.IO) { store.save(library) }
                 } catch (_: java.io.IOException) {
                     update { it.copy(status = "Could not save the project. You can still export clips.") }
                 }
@@ -69,44 +83,82 @@ internal object StudioSession {
             val part = SourcePart(source, 0, StudioMedia.duration(app, source))
             newProject(name, layout)
             addPart(app, part)
+            state.value.project?.let { save(it.copy(importComplete = true)) }
             status("Video ready")
         }
 
     fun importYouTube(context: Context, link: String, layout: Layout) =
         work(context, Work.IMPORT, "Opening YouTube recording") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
-            newProject("YouTube · $id", layout)
-            val segmented = try {
-                StudioMedia.downloadInParts(app, link) { part ->
-                    withContext(Dispatchers.Main.immediate) {
-                        addPart(app, part)
-                        describe(Work.IMPORT, "Downloading · ${state.value.project?.parts?.size ?: 0} sections ready")
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                if (state.value.project?.parts?.isNotEmpty() == true) throw error
-                false
-            }
-            if (!segmented) {
-                describe(Work.IMPORT, "Preparing full-video import")
-                val uri = YouTubeVideoImporter.download(app, link, 1080) { percent ->
-                    scope.launch {
-                        if (jobs[Work.IMPORT]?.isActive == true) describe(Work.IMPORT, "Downloading full video · $percent%")
-                    }
-                }
-                addPart(app, SourcePart(uri, 0, StudioMedia.duration(app, uri)))
-            }
-            status("Import complete")
+            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id")
+            importRecording(app, link)
         }
+
+    fun resume(context: Context) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
+        val project = state.value.project ?: return@work
+        val link = project.youtubeLink ?: return@work
+        if (!project.importComplete) importRecording(app, link)
+    }
+
+    private suspend fun importRecording(app: Context, link: String) {
+        val last = state.value.project?.parts?.map { it.part }?.filter { !it.joined }?.maxByOrNull { it.nextOffsetMs }
+        val offset = last?.nextOffsetMs ?: 0L
+        val segmented = try {
+            StudioMedia.downloadInParts(app, link, offset, last?.formatId) { part ->
+                withContext(Dispatchers.Main.immediate) {
+                    addPart(app, part)
+                    describe(Work.IMPORT, "Downloading · ${state.value.project?.parts?.count { !it.part.joined } ?: 0} sections ready")
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (state.value.project?.parts?.isNotEmpty() == true) throw error
+            false
+        }
+        if (!segmented) {
+            check(offset == 0L) { "Could not resume this format. Completed sections are still available." }
+            describe(Work.IMPORT, "Preparing full-video import")
+            val uri = YouTubeVideoImporter.download(app, link, 1080) { percent ->
+                scope.launch {
+                    if (jobs[Work.IMPORT]?.isActive == true) describe(Work.IMPORT, "Downloading full video · $percent%")
+                }
+            }
+            addPart(app, SourcePart(uri, 0, StudioMedia.duration(app, uri)))
+        }
+        state.value.project?.let { save(it.copy(importComplete = true)) }
+        status("Import complete")
+    }
+
+    fun join(context: Context, first: SourcePart, second: SourcePart) = work(context, Work.JOIN, "Joining sections") { app ->
+        val project = state.value.project ?: return@work
+        val part = project.parts.map { it.part }.firstOrNull {
+            it.joined && it.offsetMs == first.offsetMs && it.nextOffsetMs == second.nextOffsetMs
+        } ?: StudioMedia.join(app, listOf(first, second)).also {
+            val latest = state.value.project ?: return@work
+            save(latest.copy(parts = latest.parts + PartReview(it, emptyList())))
+        }
+        update { it.copy(joined = part) }
+        status("Joined sections are ready to trim")
+    }
+
+    fun preview(context: Context, clip: ExportClip) = work(context, Work.PREVIEW, "Rendering playback preview") { app ->
+        val uri = StudioMedia.preview(app, clip)
+        clearPlayback()
+        update { it.copy(playback = clip to uri) }
+    }
+
+    private fun clearPlayback() {
+        state.value.playback?.second?.path?.let { File(it).delete() }
+        update { it.copy(playback = null) }
+    }
 
     fun analyze(context: Context) = work(context, Work.ANALYZE, "Finding highlights") { app ->
         while (true) {
             val current = state.value.project ?: break
             val pending = current.parts.firstOrNull { it.highlights == null } ?: break
             describe(Work.ANALYZE, "Finding highlights · section ${current.parts.indexOf(pending) + 1}")
-            val highlights = StudioAnalysis.highlights(app, pending.part)
+            val highlights = StudioAnalysis.highlights(app, pending.part, current.mode)
             val refreshed = state.value.project ?: break
             save(refreshed.copy(parts = refreshed.parts.map {
                 if (it.part.uri == pending.part.uri) it.copy(highlights = highlights) else it
@@ -127,15 +179,11 @@ internal object StudioSession {
             update { it.copy(exports = emptyList()) }
             for ((index, clip) in clips.withIndex()) {
                 describe(Work.EXPORT, "Rendering ${index + 1} of ${clips.size}")
-                val uri = StudioMedia.export(
-                    app, clip.part, clip.start, clip.end, clip.layout, clip.camera, clip.gameplay,
-                    clip.width, clip.muted, clip.captions, clip.preset
-                )
+                val uri = StudioMedia.export(app, clip)
                 update { it.copy(exports = it.exports + uri) }
-                if (fromQueue) {
-                    val project = state.value.project
-                    if (project != null) save(project.copy(queue = project.queue - clip))
-                }
+                val project = state.value.project
+                if (project != null) save(project.copy(exports = project.exports + uri,
+                    queue = if (fromQueue) project.queue - clip else project.queue))
             }
             status(if (clips.size == 1) "Saved to Movies/Clip Studio" else "${clips.size} clips saved to Movies/Clip Studio")
         }
@@ -181,14 +229,44 @@ internal object StudioSession {
         if (autoAnalyze) analyze(app)
     }
 
-    private fun newProject(name: String, layout: Layout) {
+    fun setMode(context: Context, mode: HighlightMode) {
+        val project = state.value.project ?: return
+        if (project.mode == mode || Work.ANALYZE in jobs) return
+        save(project.copy(mode = mode, parts = project.parts.map { it.copy(highlights = if (it.part.joined) emptyList() else null) }))
+        analyze(context)
+    }
+
+    fun openProject(id: String) {
+        if (jobs.isNotEmpty()) return
+        val project = state.value.library.projects.firstOrNull { it.id == id } ?: return
+        clearPlayback()
+        update { it.copy(exports = project.exports, transcripts = emptyMap(), joined = null, status = "") }
+        save(project)
+    }
+
+    fun savePreset(preset: CreatorPreset) {
+        val library = state.value.library
+        val presets = listOf(preset) + library.presets.filterNot { it.name.equals(preset.name, true) }
+        persist(library.copy(presets = presets.take(12)))
+    }
+
+    private fun newProject(name: String, layout: Layout, link: String? = null) {
         autoAnalyze = true
-        update { it.copy(project = StudioProject(name, layout, emptyList()), exports = emptyList(), transcripts = emptyMap(), status = "") }
+        clearPlayback()
+        update { it.copy(exports = emptyList(), transcripts = emptyMap(), joined = null, status = "") }
+        save(StudioProject(name, layout, emptyList(), youtubeLink = link))
     }
 
     private fun save(project: StudioProject) {
+        val library = state.value.library
         update { it.copy(project = project) }
-        saves.trySend(project)
+        persist(library.copy(projects = listOf(project) + library.projects.filterNot { it.id == project.id },
+            currentId = project.id))
+    }
+
+    private fun persist(library: StudioLibrary) {
+        update { it.copy(library = library) }
+        saves.trySend(library)
     }
 
     private fun status(status: String) = update { it.copy(status = status) }

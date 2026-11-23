@@ -8,7 +8,7 @@ internal enum class Layout(val label: String) {
 
 internal data class Crop(val x: Float, val y: Float, val zoom: Float = 1f)
 
-internal data class SegmentRow(val name: String, val startMs: Long)
+internal data class SegmentRow(val name: String, val startMs: Long, val endMs: Long)
 
 internal fun parseSegmentRow(row: String): SegmentRow? {
     val fields = row.trim().split(',')
@@ -19,24 +19,44 @@ internal fun parseSegmentRow(row: String): SegmentRow? {
     if (!name.matches(Regex("part-[0-9]{5,}\\.mp4")) ||
         !start.isFinite() || !end.isFinite() || start < 0 || end <= start
     ) return null
-    return SegmentRow(name, (start * 1000).roundToLong())
+    return SegmentRow(name, (start * 1000).roundToLong(), (end * 1000).roundToLong())
 }
 
-internal fun videoFilter(layout: Layout, camera: Crop, game: Crop, resolution: Int = 1080): String {
+internal data class FacePoint(val timeMs: Long, val x: Float, val y: Float)
+
+internal fun trackingCoordinate(points: List<FacePoint>, fallback: Float, coordinate: (FacePoint) -> Float): String {
+    val path = points.filter { it.timeMs >= 0 && coordinate(it).isFinite() }
+        .sortedBy { it.timeMs }.distinctBy { it.timeMs }
+    if (path.isEmpty()) return fallback.coerceIn(0f, 1f).toString()
+    fun coordinateOf(point: FacePoint) = coordinate(point).coerceIn(0f, 1f)
+    var expression = coordinateOf(path.last()).toString()
+    for ((a, b) in path.zipWithNext().asReversed()) {
+        val t = a.timeMs / 1000.0
+        val next = b.timeMs / 1000.0
+        val from = coordinateOf(a)
+        val shift = coordinateOf(b) - from
+        expression = "if(lt(t,$next),$from+($shift)*clip((t-$t)/($next-$t),0,1),$expression)"
+    }
+    return expression
+}
+
+internal fun videoFilter(
+    layout: Layout, camera: Crop, game: Crop, resolution: Int = 1080, facePath: List<FacePoint> = emptyList()
+): String {
     val (outputWidth, outputHeight) = layout.dimensions(resolution)
     val panelHeight = outputHeight / 2
-    fun fill(width: Int, height: Int, crop: Crop): String {
+    fun fill(width: Int, height: Int, crop: Crop, path: List<FacePoint> = emptyList()): String {
         val ratio = "$width/$height"
         val zoom = crop.zoom.coerceIn(1f, 4f)
-        val x = crop.x.coerceIn(0f, 1f)
-        val y = crop.y.coerceIn(0f, 1f)
+        val x = trackingCoordinate(path, crop.x) { it.x }
+        val y = trackingCoordinate(path, crop.y) { it.y }
         val w = "max(2,trunc(min(iw,ih*$ratio)/$zoom/2)*2)"
         val h = "max(2,trunc(min(ih,iw/($ratio))/$zoom/2)*2)"
         return "crop=w='$w':h='$h':x='(iw-ow)*$x':y='(ih-oh)*$y'," +
             "scale=$width:$height,setsar=1"
     }
     return when (layout) {
-        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera)}[top];" +
+        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera, facePath)}[top];" +
             "[b]${fill(outputWidth, panelHeight, game)}[bottom];[top][bottom]vstack[out]"
         Layout.Fill, Layout.Square -> "[0:v]${fill(outputWidth, outputHeight, game)}[out]"
         Layout.Fit, Layout.Landscape -> "[0:v]scale=$outputWidth:$outputHeight:force_original_aspect_ratio=decrease:" +

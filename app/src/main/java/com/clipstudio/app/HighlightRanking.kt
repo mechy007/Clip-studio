@@ -1,5 +1,9 @@
 package com.clipstudio.app
 
+internal enum class HighlightMode(val label: String) {
+    BALANCED("Balanced"), FUNNY("Funny reactions"), GAMEPLAY("Gameplay action"), TALKING("Talking highlights")
+}
+
 internal data class VisualSample(val timeMs: Long, val change: Float)
 internal data class Highlight(val startMs: Long, val endMs: Long, val score: Int, val reason: String)
 
@@ -8,7 +12,8 @@ internal fun rankHighlights(
     energy: List<AudioEnergyWindow>,
     reactions: List<AudioEventWindow>,
     visual: List<VisualSample>,
-    targetMs: Long = 24_000
+    targetMs: Long = 24_000,
+    mode: HighlightMode = HighlightMode.BALANCED
 ): List<Highlight> {
     if (durationMs < 2_000L) return emptyList()
     val clipDuration = targetMs.coerceIn(2_000, durationMs)
@@ -33,11 +38,20 @@ internal fun rankHighlights(
         val reactionStrength = maxOf(laughter, shout, cheer)
         val difference = visualBySecond[second]?.change ?: 0f
         val motion = ((difference - maxOf(0.035f, typicalMotion * 1.12f)) * 4).coerceIn(0f, 1f)
-        val main = maxOf(reactionStrength, loudness * .85f, motion * .9f)
+        val speech = (-2L..2L).map { reactionBySecond[second + it]?.speech ?: 0f }.average().toFloat()
+        val main = when (mode) {
+            HighlightMode.BALANCED -> maxOf(reactionStrength, loudness * .85f, motion * .9f)
+            HighlightMode.FUNNY -> laughter * .85f + shout * .1f + cheer * .05f
+            HighlightMode.GAMEPLAY -> motion * .85f + loudness * .15f
+            HighlightMode.TALKING -> speech * .90f + loudness * .10f
+        }
         if (main < .12f) return@mapNotNull null
         val score = ((main * .72f + (reactionStrength + loudness + motion) * .093f) * 100)
             .toInt().coerceIn(0, 100)
         val reason = when {
+            mode == HighlightMode.TALKING -> "Sustained speech"
+            mode == HighlightMode.GAMEPLAY -> "Sudden visual activity"
+            mode == HighlightMode.FUNNY -> if (laughter >= shout) "Laughter detected" else "Shouting detected"
             reactionStrength >= .24f && reactionStrength == main -> when (reactionStrength) {
                 laughter -> "Laughter detected"
                 shout -> "Shouting detected"
@@ -46,7 +60,12 @@ internal fun rankHighlights(
             motion * .9f >= loudness * .85f -> "Sudden visual activity"
             else -> "Audio spike"
         }
-        val start = (time - clipDuration / 3).coerceIn(0, durationMs - clipDuration)
+        val lead = when (mode) {
+            HighlightMode.GAMEPLAY -> clipDuration * 2 / 5
+            HighlightMode.TALKING -> clipDuration / 2
+            else -> clipDuration / 3
+        }
+        val start = (time - lead).coerceIn(0, durationMs - clipDuration)
         Highlight(start, start + clipDuration, score, reason)
     }
     val selected = mutableListOf<Highlight>()

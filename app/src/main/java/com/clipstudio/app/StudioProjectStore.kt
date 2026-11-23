@@ -6,23 +6,58 @@ import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 
 internal data class PartReview(val part: SourcePart, val highlights: List<Highlight>? = null)
 internal data class StudioProject(
-    val name: String, val layout: Layout, val parts: List<PartReview>, val queue: List<ExportClip> = emptyList()
+    val name: String, val layout: Layout, val parts: List<PartReview>, val queue: List<ExportClip> = emptyList(),
+    val id: String = UUID.randomUUID().toString(),
+    val youtubeLink: String? = null, val importComplete: Boolean = false,
+    val mode: HighlightMode = HighlightMode.BALANCED, val exports: List<Uri> = emptyList()
 )
+
+internal data class CreatorPreset(
+    val name: String, val layout: Layout, val camera: Crop, val game: Crop,
+    val width: Int, val captions: CaptionPreset, val muted: Boolean, val audio: AudioFinish
+)
+
+internal data class StudioLibrary(
+    val projects: List<StudioProject> = emptyList(), val currentId: String? = null,
+    val presets: List<CreatorPreset> = emptyList()
+)
+
 
 internal class StudioProjectStore(context: Context) {
     private val file = AtomicFile(File(context.filesDir, "last-project.json"))
 
-    fun load(): StudioProject? = runCatching {
+    fun load(): StudioLibrary = runCatching {
         val root = JSONObject(String(file.readFully(), Charsets.UTF_8))
+        val saved = root.optJSONArray("projects")
+        if (saved == null) {
+            val legacy = readProject(root)
+            StudioLibrary(listOf(legacy), legacy.id)
+        } else {
+            val projects = (0 until saved.length()).mapNotNull { index ->
+                runCatching { readProject(saved.getJSONObject(index)) }.getOrNull()
+            }
+            val presets = root.optJSONArray("presets") ?: JSONArray()
+            StudioLibrary(projects, root.optString("current", "").takeIf { it.isNotEmpty() },
+                (0 until presets.length()).mapNotNull { index ->
+                    runCatching { presets.getJSONObject(index).creatorPreset() }.getOrNull()
+                })
+        }
+    }.getOrDefault(StudioLibrary())
+
+    private fun readProject(root: JSONObject): StudioProject {
         val rows = root.getJSONArray("parts")
         val parts = (0 until rows.length()).mapNotNull { index ->
             val row = rows.getJSONObject(index)
             val uri = Uri.parse(row.getString("uri"))
             if (uri.scheme == "file" && uri.path?.let { File(it).isFile } != true) return@mapNotNull null
-            val part = SourcePart(uri, row.getLong("offset"), row.getLong("duration"))
+            val offset = row.getLong("offset")
+            val duration = row.getLong("duration")
+            val part = SourcePart(uri, offset, duration, row.optLong("next", offset + duration),
+                row.optString("format", "").takeIf { it.isNotEmpty() }, row.optBoolean("joined"))
             val highlights = row.optJSONArray("highlights")?.let { items ->
                 (0 until items.length()).map { position ->
                     val item = items.getJSONObject(position)
@@ -31,7 +66,6 @@ internal class StudioProjectStore(context: Context) {
             }
             PartReview(part, highlights)
         }
-        if (parts.isEmpty()) return@runCatching null
         val sources = parts.associateBy { it.part.uri.toString() }
         val queue = root.optJSONArray("queue")?.let { items ->
             (0 until items.length()).mapNotNull { index ->
@@ -42,15 +76,36 @@ internal class StudioProjectStore(context: Context) {
                 }.getOrNull()
             }
         }.orEmpty()
-        StudioProject(root.getString("name"), Layout.valueOf(root.getString("layout")), parts, queue)
-    }.getOrNull()
+        val exports = root.optJSONArray("exports") ?: JSONArray()
+        return StudioProject(root.getString("name"), Layout.valueOf(root.getString("layout")), parts, queue,
+            root.optString("id", UUID.randomUUID().toString()),
+            root.optString("youtube", "").takeIf { it.isNotEmpty() },
+            root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) })
+    }
 
-    fun save(project: StudioProject) {
+    fun save(library: StudioLibrary) {
+        val root = JSONObject()
+            .put("current", library.currentId.orEmpty())
+            .put("projects", JSONArray(library.projects.map(::projectJson)))
+            .put("presets", JSONArray(library.presets.map { it.json() }))
+        val stream = file.startWrite()
+        try {
+            stream.write(root.toString().toByteArray(Charsets.UTF_8))
+            file.finishWrite(stream)
+        } catch (error: Exception) {
+            file.failWrite(stream)
+            throw error
+        }
+    }
+
+    private fun projectJson(project: StudioProject): JSONObject {
         val rows = JSONArray()
         project.parts.forEach { review ->
             val part = review.part
             val row = JSONObject().put("uri", part.uri.toString()).put("offset", part.offsetMs)
-                .put("duration", part.durationMs)
+                .put("duration", part.durationMs).put("next", part.nextOffsetMs)
+                .put("format", part.formatId.orEmpty()).put("joined", part.joined)
             review.highlights?.let { highlights ->
                 val items = JSONArray()
                 highlights.forEach { items.put(JSONObject().put("start", it.startMs).put("end", it.endMs)
@@ -61,16 +116,27 @@ internal class StudioProjectStore(context: Context) {
         }
         val queue = JSONArray()
         project.queue.forEach { queue.put(it.json()) }
-        val bytes = JSONObject().put("name", project.name).put("layout", project.layout.name)
-            .put("parts", rows).put("queue", queue).toString().toByteArray(Charsets.UTF_8)
-        val stream = file.startWrite()
-        try {
-            stream.write(bytes)
-            file.finishWrite(stream)
-        } catch (error: Exception) {
-            file.failWrite(stream)
-            throw error
-        }
+        return JSONObject().put("name", project.name).put("layout", project.layout.name)
+            .put("id", project.id).put("youtube", project.youtubeLink.orEmpty()).put("complete", project.importComplete)
+            .put("mode", project.mode.name).put("exports", JSONArray(project.exports.map(Uri::toString)))
+            .put("parts", rows).put("queue", queue)
+    }
+
+    private fun CreatorPreset.json() = JSONObject().put("name", name).put("layout", layout.name)
+        .put("camera", camera.json()).put("game", game.json()).put("width", width)
+        .put("captions", captions.name).put("muted", muted).put("audio", audio.json())
+
+    private fun JSONObject.creatorPreset() = CreatorPreset(getString("name"), Layout.valueOf(getString("layout")),
+        getJSONArray("camera").crop(), getJSONArray("game").crop(), getInt("width"),
+        CaptionPreset.valueOf(getString("captions")), getBoolean("muted"), audio())
+
+    private fun AudioFinish.json() = JSONObject().put("normalize", normalize).put("fade", fade)
+        .put("mix", mixTracks).put("voice", voice.toDouble()).put("game", game.toDouble())
+
+    private fun JSONObject.audio(): AudioFinish {
+        val audio = optJSONObject("audio") ?: return AudioFinish()
+        return AudioFinish(audio.optBoolean("normalize"), audio.optBoolean("fade"), audio.optBoolean("mix"),
+            audio.optDouble("voice", 1.0).toFloat(), audio.optDouble("game", .6).toFloat())
     }
 
     private fun ExportClip.json(): JSONObject {
@@ -83,6 +149,8 @@ internal class StudioProjectStore(context: Context) {
         return JSONObject().put("uri", part.uri.toString()).put("start", start).put("end", end)
             .put("layout", layout.name).put("camera", camera.json()).put("gameplay", gameplay.json())
             .put("width", width).put("muted", muted).put("preset", preset.name).put("captions", rows)
+            .put("audio", audio.json())
+            .put("tracking", JSONArray(facePath.map { JSONArray(listOf(it.timeMs, it.x.toDouble(), it.y.toDouble())) }))
     }
 
     private fun Crop.json() = JSONArray(listOf(x.toDouble(), y.toDouble(), zoom.toDouble()))
@@ -100,8 +168,13 @@ internal class StudioProjectStore(context: Context) {
                     TimedWord(word.getLong(0), word.getLong(1), word.getString(2))
                 })
         }
+        val tracking = optJSONArray("tracking") ?: JSONArray()
+        val path = (0 until tracking.length()).map { index ->
+            val point = tracking.getJSONArray(index)
+            FacePoint(point.getLong(0), point.getDouble(1).toFloat(), point.getDouble(2).toFloat())
+        }
         return ExportClip(part, getLong("start"), getLong("end"), Layout.valueOf(getString("layout")),
             getJSONArray("camera").crop(), getJSONArray("gameplay").crop(), getInt("width"), getBoolean("muted"),
-            captions, CaptionPreset.valueOf(getString("preset")))
+            captions, CaptionPreset.valueOf(getString("preset")), audio(), path)
     }
 }
