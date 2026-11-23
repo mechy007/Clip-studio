@@ -75,7 +75,8 @@ private val Languages = listOf("Auto" to null, "English" to "en", "Malayalam" to
     "Hindi" to "hi", "Tamil" to "ta", "Spanish" to "es")
 
 private enum class EditorTool(val label: String) {
-    Trim("Trim"), Frame("Frame"), Captions("Captions"), Audio("Audio"), Export("Export")
+    // Keep the previous layout and crop keys for editor state restored after an app update.
+    Trim("Trim"), Layout("Frame"), Crop("Frame"), Captions("Captions"), Audio("Audio"), Export("Export")
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -221,10 +222,11 @@ internal fun ClipEditor(
             null
         }
     }
+    val activeTool = if (tool == EditorTool.Crop) EditorTool.Layout else tool
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf(EditorTool.Trim, EditorTool.Frame, EditorTool.Captions, EditorTool.Audio).forEach { item ->
-            FilterChip(selected = tool == item, onClick = { tool = item }, label = { Text(item.label) })
+        listOf(EditorTool.Trim, EditorTool.Layout, EditorTool.Captions, EditorTool.Audio).forEach { item ->
+            FilterChip(selected = activeTool == item, onClick = { tool = item }, label = { Text(item.label) })
         }
     }
     Column(
@@ -313,7 +315,7 @@ internal fun ClipEditor(
             }
         } else {
             FramingPreview(frame, layout, camera, gameplay, { if (!lockCamera) camera = it }, { if (!lockGame) gameplay = it })
-            if (tool == EditorTool.Frame && layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
+            if (activeTool == EditorTool.Layout && layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
                 Text("Drag to reposition · pinch to zoom", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -365,7 +367,7 @@ internal fun ClipEditor(
                     })
                 }
             }
-            EditorTool.Frame -> {
+            EditorTool.Layout, EditorTool.Crop -> {
                 Text("Output layout", style = MaterialTheme.typography.titleMedium)
                 LayoutPicker(layout, !busy, StudioSession::changeLayout)
                 SettingsDisclosure("Creator presets", showingPresets, { showingPresets = !showingPresets }) {
