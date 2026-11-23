@@ -113,6 +113,7 @@ internal fun ClipEditor(
     var audioTracks by remember { mutableStateOf(0) }
     var fineFraming by rememberSaveable { mutableStateOf(false) }
     var preset by rememberSaveable { mutableStateOf(CaptionPreset.KARAOKE) }
+    var captionPosition by rememberSaveable { mutableStateOf(CaptionPosition.LOWER) }
     var captionEnabled by rememberSaveable { mutableStateOf(true) }
     var editCaptions by rememberSaveable { mutableStateOf(false) }
     var languageIndex by rememberSaveable { mutableStateOf(0) }
@@ -167,7 +168,8 @@ internal fun ClipEditor(
     fun audioOptions() = AudioFinish(normalize, fades, mix && audioTracks >= 2, voiceLevel, gameLevel)
     fun clip() = ExportClip(
         part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(),
-        preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail, enhanceFacecam = layout == Layout.Split && enhanceFacecam
+        preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail, enhanceFacecam = layout == Layout.Split && enhanceFacecam,
+        captionPosition = captionPosition
     )
     val generatingCaptions = Work.CAPTIONS in state.jobs
     val waitingForCaptions = captionEnabled && generatingCaptions
@@ -351,6 +353,7 @@ internal fun ClipEditor(
                             if (!lockGame) gameplay = saved.game
                             width = saved.width
                             preset = saved.captions
+                            captionPosition = saved.captionPosition
                             mute = saved.muted
                             normalize = saved.audio.normalize
                             fades = saved.audio.fade
@@ -367,7 +370,7 @@ internal fun ClipEditor(
                     confirmButton = {
                         TextButton(enabled = presetName.isNotBlank(), onClick = {
                             StudioSession.savePreset(CreatorPreset(presetName.trim(), layout, camera, gameplay,
-                                width, preset, mute, audioOptions()))
+                                width, preset, mute, audioOptions(), captionPosition))
                             savingPreset = false
                             presetName = ""
                         }) { Text("Save") }
@@ -482,9 +485,21 @@ internal fun ClipEditor(
                         Text("Burn into video")
                         TextButton(onClick = { editCaptions = !editCaptions }) { Text(if (editCaptions) "Done" else "Edit text") }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(CaptionPreset.CLEAN, CaptionPreset.KARAOKE, CaptionPreset.POP).forEach { item ->
-                            FilterChip(selected = item == preset, onClick = { preset = item }, label = { Text(item.label) })
+                    Text("Caption style", style = MaterialTheme.typography.titleSmall)
+                    val styles = listOf(CaptionPreset.CLEAN, CaptionPreset.KARAOKE, CaptionPreset.POP,
+                        CaptionPreset.BOUNCE, CaptionPreset.WIPE)
+                    styles.chunked(3).forEach { row ->
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            row.forEach { item ->
+                                FilterChip(selected = item == preset, onClick = { preset = item }, label = { Text(item.label) })
+                            }
+                        }
+                    }
+                    Text("Caption position", style = MaterialTheme.typography.titleSmall)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CaptionPosition.entries.forEach { item ->
+                            FilterChip(selected = item == captionPosition, onClick = { captionPosition = item },
+                                label = { Text(item.label) })
                         }
                     }
                     if (editCaptions) transcript.forEachIndexed { index, row ->

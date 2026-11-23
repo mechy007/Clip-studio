@@ -20,7 +20,8 @@ internal data class StudioProject(
 
 internal data class CreatorPreset(
     val name: String, val layout: Layout, val camera: Crop, val game: Crop,
-    val width: Int, val captions: CaptionPreset, val muted: Boolean, val audio: AudioFinish
+    val width: Int, val captions: CaptionPreset, val muted: Boolean, val audio: AudioFinish,
+    val captionPosition: CaptionPosition = CaptionPosition.LOWER
 )
 
 internal data class StudioLibrary(
@@ -142,10 +143,11 @@ internal class StudioProjectStore(context: Context) {
     private fun CreatorPreset.json() = JSONObject().put("name", name).put("layout", layout.name)
         .put("camera", camera.json()).put("game", game.json()).put("width", width)
         .put("captions", captions.name).put("muted", muted).put("audio", audio.json())
+        .put("captionPosition", captionPosition.name)
 
     private fun JSONObject.creatorPreset() = CreatorPreset(getString("name"), Layout.valueOf(getString("layout")),
         getJSONArray("camera").crop(), getJSONArray("game").crop(), getInt("width"),
-        CaptionPreset.valueOf(getString("captions")), getBoolean("muted"), audio())
+        CaptionPreset.valueOf(getString("captions")), getBoolean("muted"), audio(), captionPosition())
 
     private fun AudioFinish.json() = JSONObject().put("normalize", normalize).put("fade", fade)
         .put("mix", mixTracks).put("voice", voice.toDouble()).put("game", game.toDouble())
@@ -167,7 +169,7 @@ internal class StudioProjectStore(context: Context) {
             .put("layout", layout.name).put("camera", camera.json()).put("gameplay", gameplay.json())
             .put("width", width).put("muted", muted).put("preset", preset.name).put("captions", rows)
             .put("audio", audio.json()).put("fast", fastExport).put("original", originalFraming).put("detail", highDetail)
-            .put("enhanceFacecam", enhanceFacecam)
+            .put("enhanceFacecam", enhanceFacecam).put("captionPosition", captionPosition.name)
             .put("tracking", JSONArray(facePath.map { JSONArray(listOf(it.timeMs, it.x.toDouble(), it.y.toDouble())) }))
     }
 
@@ -194,6 +196,11 @@ internal class StudioProjectStore(context: Context) {
         return ExportClip(part, getLong("start"), getLong("end"), Layout.valueOf(getString("layout")),
             getJSONArray("camera").crop(), getJSONArray("gameplay").crop(), getInt("width"), getBoolean("muted"),
             captions, CaptionPreset.valueOf(getString("preset")), audio(), path, optBoolean("fast"), optBoolean("original"),
-            optBoolean("detail"), optBoolean("enhanceFacecam"))
+            optBoolean("detail"), optBoolean("enhanceFacecam"), captionPosition())
+    }
+
+    private fun JSONObject.captionPosition(): CaptionPosition {
+        val name = optString("captionPosition")
+        return CaptionPosition.entries.firstOrNull { it.name == name } ?: CaptionPosition.LOWER
     }
 }

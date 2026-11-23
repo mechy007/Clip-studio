@@ -59,6 +59,38 @@ class ImportedWorkflowTest {
         assertEquals(listOf(cue.text), frame.words)
     }
 
+    @Test fun bouncesOnlyTheActiveWordAndClampsTheMotionToItsDuration() {
+        val cue = CaptionCue(200, 800, "one two",
+            listOf(TimedWord(200, 260, "one"), TimedWord(260, 800, "two")))
+        val script = AssKaraokeTrack.render(listOf(cue), CaptionPreset.BOUNCE, 1080, 1920)
+        val events = script.lineSequence().filter { it.startsWith("Dialogue:") }.toList()
+        assertTrue(events[0].contains("\\t(0,30,\\fscx120\\fscy120)\\t(30,60,\\fscx100\\fscy100)"))
+        assertTrue(events[0].endsWith("one{\\r} two"))
+        assertTrue(events[1].contains(",,one {\\t(0,50"))
+    }
+
+    @Test fun wipesTheTimedWordAndUsesHighlightForBidirectionalText() {
+        val cue = CaptionCue(25, 318, "one two",
+            listOf(TimedWord(25, 183, "one"), TimedWord(183, 318, "two")))
+        val script = AssKaraokeTrack.render(listOf(cue), CaptionPreset.WIPE, 720, 1280)
+        assertTrue(script.contains("{\\kf16\\c&H1FD2FF&}one{\\r} {\\k0}two"))
+        assertTrue(script.contains("{\\k0}one {\\kf13\\c&H1FD2FF&}two"))
+        val rtl = AssKaraokeTrack.render(listOf(CaptionCue(0, 900, "مرحبا بالعالم")),
+            CaptionPreset.WIPE, 720, 1280)
+        assertFalse(rtl.contains("\\kf"))
+        assertTrue(rtl.contains("{\\c&H1FD2FF&}مرحبا"))
+    }
+
+    @Test fun captionPlacementPreservesTheExistingDefaultAndSupportsUpperAndCenter() {
+        val cues = listOf(CaptionCue(0, 500, "sample"))
+        val lower = AssKaraokeTrack.render(cues, CaptionPreset.CLEAN, 1080, 1920)
+        val center = AssKaraokeTrack.render(cues, CaptionPreset.CLEAN, 1080, 1920, CaptionPosition.CENTER)
+        val upper = AssKaraokeTrack.render(cues, CaptionPreset.CLEAN, 1080, 1920, CaptionPosition.UPPER)
+        assertTrue(lower.lineSequence().first { it.startsWith("Style:") }.endsWith(",2,86,86,384,1"))
+        assertTrue(center.lineSequence().first { it.startsWith("Style:") }.endsWith(",5,86,86,0,1"))
+        assertTrue(upper.lineSequence().first { it.startsWith("Style:") }.endsWith(",8,86,86,192,1"))
+    }
+
     @Test fun rendersEqual720PanelsAndMapsPreviewCropWithinBounds() {
         val filter = videoFilter(Layout.Split, Crop(0f, 1f, 3f), Crop(1f, 0f), resolution = 720)
         assertEquals(2, Regex("scale=720:640").findAll(filter).count())

@@ -47,7 +47,8 @@ internal data class ExportClip(
     val preset: CaptionPreset = CaptionPreset.KARAOKE,
     val audio: AudioFinish = AudioFinish(), val facePath: List<FacePoint> = emptyList(),
     val fastExport: Boolean = false, val originalFraming: Boolean = false, val highDetail: Boolean = false,
-    val enhanceFacecam: Boolean = false
+    val enhanceFacecam: Boolean = false,
+    val captionPosition: CaptionPosition = CaptionPosition.LOWER
 )
 
 internal object StudioSession {

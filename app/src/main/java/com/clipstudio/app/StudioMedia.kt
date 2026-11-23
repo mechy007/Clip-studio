@@ -267,7 +267,7 @@ internal object StudioMedia {
             val renderFilter = if (captions.isEmpty()) filter else {
                 val script = File.createTempFile("studio-captions-", ".ass", context.cacheDir)
                 subtitle = script
-                script.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight))
+                script.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight, clip.captionPosition))
                 "$filter;[out]setpts=PTS-STARTPTS,ass=filename='${script.absolutePath}':fontsdir=/system/fonts[captioned]"
             }
             val video = if (subtitle == null) "[out]" else "[captioned]"
