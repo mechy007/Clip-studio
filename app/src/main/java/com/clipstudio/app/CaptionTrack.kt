@@ -16,11 +16,7 @@ enum class CaptionPreset(val label: String, val animated: Boolean = false) {
     BOXED("Boxed")
 }
 
-/**
- * Builds subtitle sidecars from the existing local transcript.
- * This deliberately does not claim to burn captions into the MP4; visual
- * rendering is handled by the video export pipeline in a later stage.
- */
+/** Converts source-relative transcripts to clip-relative captions for render and SRT export. */
 object CaptionTrack {
     fun fromTranscript(
         transcript: List<TranscriptSegment>,

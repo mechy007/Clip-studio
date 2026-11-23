@@ -169,6 +169,17 @@ internal fun ClipEditor(
         part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(),
         preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail, enhanceFacecam = layout == Layout.Split && enhanceFacecam
     )
+    val generatingCaptions = Work.CAPTIONS in state.jobs
+    val waitingForCaptions = captionEnabled && generatingCaptions
+    val canRenderEdit = !busy && !waitingForCaptions && end - start >= 500L
+    val canPreviewEdit = canRenderEdit && Work.PREVIEW !in state.jobs
+    fun previewEdit() {
+        playing = false
+        live = false
+        showPreview = true
+        StudioSession.preview(context, clip())
+        notify()
+    }
     val previewUri = state.playback?.takeIf { it.first == clip() }?.second
     val renderingPreview = Work.PREVIEW in state.jobs
     LaunchedEffect(showPreview, previewUri, renderingPreview) {
@@ -209,14 +220,8 @@ internal fun ClipEditor(
                 playing = true
                 showPreview = false
             }, label = { Text("Source") })
-            FilterChip(selected = showPreview, enabled = !busy && end - start >= 500 && Work.PREVIEW !in state.jobs,
-                onClick = {
-                    playing = false
-                    live = false
-                    showPreview = true
-                    StudioSession.preview(context, clip())
-                    notify()
-                }, label = { Text("Edited") })
+            FilterChip(selected = showPreview, enabled = canPreviewEdit,
+                onClick = ::previewEdit, label = { Text("Edited") })
         }
         if (showPreview && previewUri != null) {
             val (previewWidth, previewHeight) = layout.dimensions(540)
@@ -327,8 +332,7 @@ internal fun ClipEditor(
             FilterChip(selected = tool == item, onClick = { tool = item }, label = { Text(item.label) })
         }
     }
-    val canExport = !busy && end - start >= 500L
-    val canCaption = canExport && end - start <= StudioAnalysis.MAX_CAPTION_DURATION_MS && Work.CAPTIONS !in state.jobs
+    val canCaption = canRenderEdit && !generatingCaptions && end - start <= StudioAnalysis.MAX_CAPTION_DURATION_MS
     Column(
         Modifier.fillMaxWidth().bringIntoViewRequester(toolAnchor).clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surface).padding(12.dp),
@@ -462,6 +466,16 @@ internal fun ClipEditor(
                         onClick = { languageIndex = (languageIndex + 1) % Languages.size }) { Text(Languages[languageIndex].first) }
                 }
                 if (end - start > StudioAnalysis.MAX_CAPTION_DURATION_MS) Text("Choose up to 2 minutes for automatic captions.")
+                if (generatingCaptions) {
+                    Text("Generating captions…", style = MaterialTheme.typography.bodySmall)
+                } else if (activeCues.isNotEmpty()) {
+                    OutlinedButton(enabled = captionEnabled && canPreviewEdit, onClick = ::previewEdit) {
+                        Text("Preview captions")
+                    }
+                } else if (transcript.isNotEmpty()) {
+                    Text("No captions overlap this trim. Generate captions for the selected range.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
                 if (transcript.isNotEmpty()) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Switch(checked = captionEnabled, onCheckedChange = { captionEnabled = it })
@@ -528,11 +542,16 @@ internal fun ClipEditor(
                 FilterChip(selected = highDetail, onClick = { highDetail = !highDetail }, label = { Text("High detail") })
                 if (highDetail) Text("Higher bitrate preserves more detail and makes larger MP4 files.",
                     style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(enabled = canExport, onClick = {
+                val burnIn = captionEnabled && activeCues.isNotEmpty()
+                if (waitingForCaptions || burnIn) {
+                    Text(if (waitingForCaptions) "Waiting for captions…" else "${preset.label} captions will be burned into the MP4",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                OutlinedButton(enabled = canRenderEdit && !burnIn, onClick = {
                     StudioSession.export(context, listOf(clip().copy(fastExport = true, originalFraming = true,
                         captions = emptyList(), facePath = emptyList(), audio = AudioFinish(), muted = false)))
                     notify()
-                }) { Text("Quick trim · original video and audio") }
+                }) { Text("Quick trim · no captions") }
                 Text("Output resolution", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(720, 1080, 1440).forEach {
@@ -548,11 +567,11 @@ internal fun ClipEditor(
                         style = MaterialTheme.typography.bodySmall)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(enabled = canExport, onClick = {
+                    Button(enabled = canRenderEdit, onClick = {
                         StudioSession.export(context, listOf(clip()))
                         notify()
                     }) { Text("Export MP4") }
-                    OutlinedButton(enabled = canExport && state.queue.size < 10, onClick = { StudioSession.queue(clip()) }) {
+                    OutlinedButton(enabled = canRenderEdit && state.queue.size < 10, onClick = { StudioSession.queue(clip()) }) {
                         Text("Add to queue")
                     }
                 }

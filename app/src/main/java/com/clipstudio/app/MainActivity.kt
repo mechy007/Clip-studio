@@ -364,7 +364,11 @@ class MainActivity : ComponentActivity() {
                                 Text("Export queue", style = MaterialTheme.typography.titleLarge)
                                 state.queue.forEachIndexed { index, clip ->
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text("${timestamp(clip.part.offsetMs + clip.start)} · ${clip.layout.label}", Modifier.weight(1f))
+                                        Column(Modifier.weight(1f)) {
+                                            Text("${timestamp(clip.part.offsetMs + clip.start)} · ${clip.layout.label}")
+                                            Text(if (clip.captions.isEmpty()) "No captions" else "${clip.preset.label} captions",
+                                                style = MaterialTheme.typography.labelSmall)
+                                        }
                                         if (clip != state.exportingClip) TextButton(onClick = {
                                             StudioSession.exportFirst(this@MainActivity, clip)
                                             showNotificationPermission()

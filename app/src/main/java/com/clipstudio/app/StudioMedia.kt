@@ -234,7 +234,7 @@ internal object StudioMedia {
         val width = if (preview) 540 else clip.width
         val captions = if (clip.originalFraming) emptyList() else clip.captions
         val output = File.createTempFile(if (preview) "studio-preview-" else "studio-export-", ".mp4", context.cacheDir)
-        val subtitle = if (captions.isEmpty()) null else File.createTempFile("studio-captions-", ".ass", context.cacheDir)
+        var subtitle: File? = null
         var done = false
         var firstAttempt: Long? = null
         var retried = false
@@ -264,9 +264,11 @@ internal object StudioMedia {
             val (frameWidth, frameHeight) = layout.dimensions(width)
             val filter = if (clip.originalFraming) "[0:v]pad=ceil(iw/2)*2:ceil(ih/2)*2[out]"
                 else videoFilter(layout, camera, gameplay, width, clip.facePath, clip.enhanceFacecam)
-            val renderFilter = if (subtitle == null) filter else {
-                subtitle.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight))
-                "$filter;[out]subtitles=filename='${subtitle.absolutePath}':fontsdir=/system/fonts[captioned]"
+            val renderFilter = if (captions.isEmpty()) filter else {
+                val script = File.createTempFile("studio-captions-", ".ass", context.cacheDir)
+                subtitle = script
+                script.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight))
+                "$filter;[out]setpts=PTS-STARTPTS,ass=filename='${script.absolutePath}':fontsdir=/system/fonts[captioned]"
             }
             val video = if (subtitle == null) "[out]" else "[captioned]"
             val tracks = if (clip.muted && !clip.originalFraming) 0 else audioTrackCount(context, part.uri)
@@ -301,7 +303,9 @@ internal object StudioMedia {
             }
             val software = arguments(listOf("-threads", "2", "-c:v", "libopenh264"), "yuv420p")
             check(attempt(if (retried) "Retrying with software H.264" else "Rendering with software H.264",
-                software)) { "Could not render this clip." }
+                software)) {
+                if (subtitle == null) "Could not render this clip." else "Could not render the clip with its captions."
+            }
             result("Software H.264")
         } finally {
             if (!done) output.delete()
