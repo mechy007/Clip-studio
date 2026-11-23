@@ -104,7 +104,7 @@ internal object StudioSession {
                 try {
                     withContext(Dispatchers.IO) {
                         store.save(library)
-                        library.projects.filter { it.guidedFromFull && it.importComplete }.forEach {
+                        library.projects.filter { it.guidedImport && it.importComplete }.forEach {
                             runCatching { StudioMedia.guidedFullFile(app, it.id).delete() }
                         }
                     }
@@ -127,20 +127,21 @@ internal object StudioSession {
 
     fun importYouTube(
         context: Context, link: String, layout: Layout, guided: Boolean = false, startMs: Long = 0,
-        fromFull: Boolean = false
+        fromFull: Boolean = false, fastParts: Boolean = false
     ) =
         work(context, Work.IMPORT, "Opening YouTube recording") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
-            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided, startMs, fromFull)
+            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided, startMs, fromFull, fastParts)
             if (guided) importGuidedPart(app) else importRecording(app, link)
         }
 
-    fun resume(context: Context, useFullDownload: Boolean = false) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
+    fun resume(context: Context, useFullDownload: Boolean = false, useFastParts: Boolean = false) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
         val project = state.value.project ?: return@work
         val link = project.youtubeLink ?: return@work
         if (!project.importComplete) {
             if (project.guidedImport) {
-                if (useFullDownload && !project.guidedFromFull) save(project.copy(guidedFromFull = true))
+                if (useFullDownload) save(project.copy(guidedFromFull = true, fastGuidedParts = false))
+                else if (useFastParts) save(project.copy(guidedFromFull = false, fastGuidedParts = true))
                 importGuidedPart(app)
             } else importRecording(app, link)
         }
@@ -182,12 +183,13 @@ internal object StudioSession {
                 publish = publish)
         } else {
             StudioMedia.downloadRecordingPart(app, project.id, link, start,
-                previous?.formatId, progress = { progress ->
+                previous?.formatId, fast = project.fastGuidedParts, progress = { progress ->
                     scope.launch {
                         if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
                         val current = state.value.guidedDownload
-                        if (current?.assembling == true || progress.percent < (current?.percent ?: 0)) return@launch
-                        val label = if (progress.assembling) "Assembling part $partNumber" else buildString {
+                        if (!progress.newAttempt && (current?.assembling == true || progress.percent < (current?.percent ?: 0))) return@launch
+                        val label = if (progress.newAttempt) "Trying resumable download for part $partNumber"
+                        else if (progress.assembling) "Assembling part $partNumber" else buildString {
                             append("Downloading part $partNumber · ${progress.percent}%")
                             progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
                         }
@@ -514,13 +516,13 @@ internal object StudioSession {
 
     private fun newProject(
         name: String, layout: Layout, link: String? = null, guided: Boolean = false, startMs: Long = 0,
-        fromFull: Boolean = false
+        fromFull: Boolean = false, fastParts: Boolean = false
     ) {
         autoAnalyze = true
         clearPlayback()
         update { it.copy(exports = emptyList(), transcripts = emptyMap(), joined = null, guidedPart = null, status = "") }
         save(StudioProject(name, layout, emptyList(), youtubeLink = link, guidedImport = guided,
-            guidedStartMs = startMs, guidedFromFull = guided && fromFull))
+            guidedStartMs = startMs, guidedFromFull = guided && fromFull, fastGuidedParts = guided && fastParts && !fromFull))
     }
 
     private fun save(project: StudioProject) {

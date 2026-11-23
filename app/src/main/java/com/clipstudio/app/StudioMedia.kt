@@ -256,7 +256,7 @@ internal object StudioMedia {
     /** Commit each short piece locally so a retry does not fetch completed pieces again. */
     suspend fun downloadRecordingPart(
         context: Context, projectId: String, link: String, startMs: Long, previousFormat: String?,
-        progress: (GuidedDownloadProgress) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
+        fast: Boolean = false, progress: (GuidedDownloadProgress) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
     ) = withContext(Dispatchers.IO) {
         val directory = File(guidedDirectory(context, projectId), startMs.toString())
         val files = GuidedDownloadFiles(directory)
@@ -271,7 +271,10 @@ internal object StudioMedia {
         val range = plan.range
         val chunks = range.downloadChunks()
         val publishedDuration = recordingDuration(context, files.output, range.lengthMs)
-        if (publishedDuration == null) {
+        val tryFast = fast && publishedDuration == null && chunks.indices.none { files.chunk(it).isFile }
+        val copied = tryFast && copyRecordingRange(context, link, plan, files, progress)
+        if (tryFast && !copied) progress(GuidedDownloadProgress(0, null, newAttempt = true))
+        if (publishedDuration == null && !copied) {
             files.output.delete()
             val completed = chunks.mapIndexed { index, chunk ->
                 val file = files.chunk(index)
@@ -327,6 +330,34 @@ internal object StudioMedia {
         withContext(NonCancellable) {
             publish(SourcePart(url, range.startMs, actualDuration, range.endMs, plan.format), range.endMs == plan.recordingEndMs)
             chunks.indices.forEach { files.chunk(it).delete() }
+        }
+    }
+
+    private suspend fun copyRecordingRange(
+        context: Context, link: String, plan: GuidedDownloadPlan, files: GuidedDownloadFiles,
+        progress: (GuidedDownloadProgress) -> Unit
+    ): Boolean {
+        val folder = File(files.directory, "quick-download")
+        folder.deleteRecursively()
+        if (!folder.mkdir()) return false
+        val range = plan.range
+        val started = SystemClock.elapsedRealtime()
+        progress(GuidedDownloadProgress(0, null))
+        try {
+            val media = YouTubeVideoImporter.downloadSection(context, link, plan.format, range, folder, copyTracks = true) {
+                progress(guidedDownloadProgress(range.lengthMs, 0, it, SystemClock.elapsedRealtime() - started))
+            }
+            val actual = recordingDuration(context, media, range.lengthMs) ?: return false
+            if (abs(actual - range.lengthMs) > 350L || !FastMedia.matchesDownloadedPart(context, Uri.fromFile(media))) {
+                return false
+            }
+            return media.renameTo(files.output)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: com.yausername.youtubedl_android.YoutubeDLException) {
+            return false
+        } finally {
+            folder.deleteRecursively()
         }
     }
 

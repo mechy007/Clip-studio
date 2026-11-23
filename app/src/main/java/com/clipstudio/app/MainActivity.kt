@@ -109,6 +109,7 @@ class MainActivity : ComponentActivity() {
         val pages = rememberSaveableStateHolder()
         var link by rememberSaveable { mutableStateOf("") }
         var guidedImport by rememberSaveable { mutableStateOf(false) }
+        var fastParts by rememberSaveable { mutableStateOf(false) }
         var downloadFullFirst by rememberSaveable { mutableStateOf(false) }
         var recordingStart by rememberSaveable { mutableStateOf("") }
         val startMs = recordingStartMs(recordingStart)
@@ -318,6 +319,10 @@ class MainActivity : ComponentActivity() {
                                     FilterChip(selected = guidedImport, enabled = !occupied,
                                         onClick = { guidedImport = !guidedImport }, label = { Text("30-minute parts") })
                                     if (guidedImport) {
+                                        if (!downloadFullFirst) {
+                                            FilterChip(selected = fastParts, enabled = !occupied,
+                                                onClick = { fastParts = !fastParts }, label = { Text("Fast part download") })
+                                        }
                                         FilterChip(selected = downloadFullFirst, enabled = !occupied,
                                             onClick = { downloadFullFirst = !downloadFullFirst },
                                             label = { Text("Download full video first") })
@@ -339,7 +344,7 @@ class MainActivity : ComponentActivity() {
                                             selectedPart = null
                                             chosenMoment = -1L
                                             StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout, guidedImport,
-                                                if (guidedImport) startMs ?: 0L else 0L, fromFull = downloadFullFirst)
+                                                if (guidedImport) startMs ?: 0L else 0L, fromFull = downloadFullFirst, fastParts = fastParts)
                                             showNotificationPermission()
                                         }
                                     ) { Text(when {
@@ -365,6 +370,12 @@ class MainActivity : ComponentActivity() {
                             if (guidedPending) {
                                 OutlinedButton(enabled = canDownloadPart, onClick = ::downloadNextPart) {
                                     Text("Download part $nextPartNumber")
+                                }
+                                if (project?.fastGuidedParts == false || project?.guidedFromFull == true) {
+                                    OutlinedButton(enabled = canDownloadPart, onClick = {
+                                        StudioSession.resume(this@MainActivity, useFastParts = true)
+                                        showNotificationPermission()
+                                    }) { Text("Try fast part download") }
                                 }
                                 if (project?.guidedFromFull == false) {
                                     OutlinedButton(enabled = canDownloadPart, onClick = {
