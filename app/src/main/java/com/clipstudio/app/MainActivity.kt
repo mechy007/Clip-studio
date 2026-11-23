@@ -259,6 +259,10 @@ class MainActivity : ComponentActivity() {
                     state.queue.forEachIndexed { index, clip ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("${timestamp(clip.part.offsetMs + clip.start)} · ${clip.layout.label}", Modifier.weight(1f))
+                            if (clip != state.exportingClip) TextButton(onClick = {
+                                StudioSession.exportFirst(this@MainActivity, clip)
+                                showNotificationPermission()
+                            }) { Text(if (state.queueExportActive) "Next" else if (exporting) "Move first" else "Export first") }
                             TextButton(enabled = !exporting, onClick = { StudioSession.removeQueued(index) }) { Text("Remove") }
                         }
                     }
@@ -273,6 +277,20 @@ class MainActivity : ComponentActivity() {
                 if (state.exports.isNotEmpty()) {
                     Text("${state.exports.size} MP4 ${if (state.exports.size == 1) "ready" else "files ready"}",
                         style = MaterialTheme.typography.titleMedium)
+                    val timings = state.exports.mapIndexedNotNull { index, uri ->
+                        state.exportStats[uri]?.let { index + 1 to it }
+                    }
+                    if (timings.isNotEmpty()) {
+                        var history by rememberSaveable { mutableStateOf(false) }
+                        TextButton(onClick = { history = !history }) { Text(if (history) "Latest timing" else "Export timings") }
+                        (if (history) timings.takeLast(6) else timings.takeLast(1)).forEach { (index, stats) ->
+                            val total = stats.preparationMs + stats.renderMs + stats.saveMs
+                            Text("Clip $index · ${stats.encoder} · ${elapsed(total)} total", style = MaterialTheme.typography.titleSmall)
+                            Text("Setup ${elapsed(stats.preparationMs)} · Render and encode ${elapsed(stats.renderMs)} · Save ${elapsed(stats.saveMs)}",
+                                style = MaterialTheme.typography.bodySmall)
+                            if (stats.retried) Text("Includes time spent retrying", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = {
                             val play = Intent(Intent.ACTION_VIEW).setDataAndType(state.exports.last(), "video/mp4")
@@ -322,3 +340,5 @@ internal fun timestamp(ms: Long): String {
     val seconds = ms / 1000
     return String.format(Locale.US, "%d:%02d", seconds / 60, seconds % 60)
 }
+
+private fun elapsed(ms: Long): String = String.format(Locale.US, "%.1f s", ms / 1000.0)

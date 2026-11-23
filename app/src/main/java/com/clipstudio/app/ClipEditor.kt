@@ -80,6 +80,10 @@ internal fun ClipEditor(
     var lockCamera by rememberSaveable { mutableStateOf(false) }
     var lockGame by rememberSaveable { mutableStateOf(false) }
     var showPreview by rememberSaveable { mutableStateOf(false) }
+    var live by rememberSaveable { mutableStateOf(false) }
+    var fast by rememberSaveable { mutableStateOf(true) }
+    var sourceSize by remember { mutableStateOf(0 to 0) }
+    var trackingOn by rememberSaveable { mutableStateOf(false) }
     var normalize by rememberSaveable { mutableStateOf(false) }
     var fades by rememberSaveable { mutableStateOf(false) }
     var mix by rememberSaveable { mutableStateOf(false) }
@@ -111,7 +115,12 @@ internal fun ClipEditor(
         appliedSelection = momentSelection
     }
     val busy = Work.EXPORT in state.jobs
-    var facePath by remember(start, end, camera, layout) { mutableStateOf(emptyList<FacePoint>()) }
+    val tracking = state.tracking.lastOrNull { it.part == part && it.camera == camera && it.start <= start && it.end >= end }
+    val facePath = remember(trackingOn, tracking, start, end, layout) {
+        if (trackingOn && tracking != null && layout == Layout.Split) {
+            rebaseTracking(tracking.path, start - tracking.start, end - tracking.start)
+        } else emptyList()
+    }
     LaunchedEffect(part.uri) {
         audioTracks = withContext(Dispatchers.IO) { StudioMedia.audioTrackCount(context, part.uri) }
         waveform = try {
@@ -126,10 +135,11 @@ internal fun ClipEditor(
     fun audioOptions() = AudioFinish(normalize, fades, mix && audioTracks >= 2, voiceLevel, gameLevel)
     fun clip() = ExportClip(
         part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(),
-        preset, audioOptions(), facePath
+        preset, audioOptions(), facePath, fastExport = fast
     )
     val previewUri = state.playback?.takeIf { it.first == clip() }?.second
-    LaunchedEffect(part.uri, frameAt) {
+    LaunchedEffect(part.uri, frameAt, live) {
+        if (live) return@LaunchedEffect
         frame = try {
             StudioFraming.frame(context, part.uri, frameAt.coerceIn(0, part.durationMs - 1))
         } catch (cancelled: CancellationException) {
@@ -156,6 +166,28 @@ internal fun ClipEditor(
                 )
             }
         }
+    } else if (live) {
+        val (liveWidth, liveHeight) = layout.dimensions(720)
+        val gestures = framingGestures(layout, sourceSize.first, sourceSize.second, camera, gameplay,
+            { if (!lockCamera) camera = it }, { if (!lockGame) gameplay = it })
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Box(Modifier.heightIn(max = 410.dp).aspectRatio(liveWidth.toFloat() / liveHeight,
+                matchHeightConstraintsFirst = liveHeight > liveWidth).then(gestures)) {
+                AndroidView(
+                    factory = { playerContext ->
+                        LiveFramingView(playerContext, part.uri, { w, h -> sourceSize = w to h }) {
+                            live = false
+                            faceStatus = "Live playback unavailable for this source"
+                        }
+                    },
+                    modifier = Modifier.matchParentSize(),
+                    update = { it.updateFrame(layout, camera, gameplay, facePath, start, end, mute) },
+                    onRelease = { it.close() }
+                )
+            }
+        }
+        Text("Live framing · captions and audio effects in Preview edited clip",
+            style = MaterialTheme.typography.bodySmall)
     } else if (playing) {
         key(part.uri, start) {
             AndroidView(
@@ -176,7 +208,14 @@ internal fun ClipEditor(
             style = MaterialTheme.typography.bodySmall)
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = { showPreview = false; playing = !playing }) { Text(if (playing) "Frame preview" else "Play source") }
+        OutlinedButton(enabled = end > start, onClick = {
+            showPreview = false; playing = false; live = !live
+        }) { Text(if (live) "Stop live preview" else "Live preview") }
+        TextButton(onClick = { showPreview = false; live = false; playing = !playing }) {
+            Text(if (playing) "Frame preview" else "Play source")
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (layout == Layout.Split) {
             OutlinedButton(enabled = faceStatus != "Finding facecam…" && end > start && !busy && !lockCamera, onClick = {
                 faceStatus = "Finding facecam…"
@@ -197,6 +236,7 @@ internal fun ClipEditor(
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(enabled = !busy && end - start >= 500 && Work.PREVIEW !in state.jobs, onClick = {
             playing = false
+            live = false
             showPreview = true
             StudioSession.preview(context, clip())
             notify()
@@ -212,15 +252,21 @@ internal fun ClipEditor(
         OutlinedButton(enabled = !lockCamera && !busy && end - start >= 1000 &&
             faceStatus != "Tracking facecam…" && faceStatus != "Finding facecam…", onClick = {
             if (facePath.isNotEmpty()) {
-                facePath = emptyList()
+                trackingOn = false
                 faceStatus = "Facecam tracking off"
+            } else if (tracking != null) {
+                trackingOn = true
+                faceStatus = "Reused facecam tracking"
             } else {
                 faceStatus = "Tracking facecam…"
                 scope.launch {
                     try {
                         val tracked = StudioFraming.track(context, part, expectedStart, expectedEnd, expectedCamera)
                         if (latestTrim == Triple(expectedStart, expectedEnd, expectedCamera) && !locked) {
-                            facePath = tracked
+                            if (tracked.isNotEmpty()) {
+                                StudioSession.rememberTracking(TrackingMemo(part, expectedStart, expectedEnd, expectedCamera, tracked))
+                                trackingOn = true
+                            }
                             faceStatus = if (tracked.isEmpty()) "No consistent facecam path found" else "Facecam path ready"
                         } else faceStatus = "Framing changed. Run tracking again."
                     } catch (cancelled: CancellationException) { throw cancelled }
@@ -229,7 +275,7 @@ internal fun ClipEditor(
             }
         }) { Text(if (facePath.isEmpty()) "Track facecam" else "Turn tracking off") }
     }
-    if (layout == Layout.Split && faceStatus.isNotBlank()) Text(faceStatus)
+    if (faceStatus.isNotBlank()) Text(faceStatus)
     if (layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { fineFraming = !fineFraming }) { Text(if (fineFraming) "Hide controls" else "Fine controls") }
@@ -260,6 +306,7 @@ internal fun ClipEditor(
         WaveformTimeline(waveformData, part.durationMs, start, end, frameAt, seek = { time ->
             playing = false
             showPreview = false
+            live = false
             frameAt = time
         }, onTrim = { first, last ->
             start = first
@@ -275,6 +322,7 @@ internal fun ClipEditor(
     Slider(scrub, { scrub = it }, valueRange = 0f..part.durationMs.toFloat(), onValueChangeFinished = {
         playing = false
         showPreview = false
+        live = false
         frameAt = scrub.toLong().coerceAtMost(part.durationMs - 1)
     })
     val canExport = !busy && end - start >= 500L
@@ -331,6 +379,13 @@ internal fun ClipEditor(
     if (subtitleStatus.isNotBlank()) Text(subtitleStatus)
     TextButton(onClick = { options = !options }) { Text(if (options) "Hide export settings" else "Export settings · ${width}p") }
     if (options) {
+        FilterChip(selected = fast, onClick = { fast = !fast }, label = { Text("Fast Export") })
+        if (fast) Text("Tries hardware H.264 at the selected resolution", style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(enabled = canExport, onClick = {
+            StudioSession.export(context, listOf(clip().copy(fastExport = true, originalFraming = true,
+                captions = emptyList(), facePath = emptyList(), audio = AudioFinish(), muted = false)))
+            notify()
+        }) { Text("Quick trim · original video and audio") }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(720, 1080).forEach {
                 FilterChip(selected = width == it, onClick = { width = it }, label = { Text("${it}p") })
