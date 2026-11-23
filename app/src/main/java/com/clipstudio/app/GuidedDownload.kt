@@ -12,7 +12,9 @@ internal fun RecordingPartWindow.downloadChunks(): List<RecordingPartWindow> =
         (start + minOf(DOWNLOAD_CHUNK_MS, endMs - start)).takeIf { it < endMs }
     }.map { start -> RecordingPartWindow(start, start + minOf(DOWNLOAD_CHUNK_MS, endMs - start)) }.toList()
 
-internal data class GuidedDownloadProgress(val percent: Int, val etaMs: Long?, val assembling: Boolean = false)
+internal data class GuidedDownloadProgress(
+    val percent: Int, val etaMs: Long?, val assembling: Boolean = false, val newAttempt: Boolean = false
+)
 
 internal fun guidedDownloadProgress(
     totalMs: Long, savedMs: Long, processedMs: Long, elapsedMs: Long

@@ -41,6 +41,14 @@ internal object FastMedia {
             extractor.sampleTime >= 0 && extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
         } ?: false
 
+    fun matchesDownloadedPart(context: Context, uri: Uri): Boolean =
+        inspect(context, uri) { extractor, formats ->
+            val video = formats.indexOfFirst { it.mime() == MediaFormat.MIMETYPE_VIDEO_AVC }
+            if (video < 0 || formats.none { it.mime() == MediaFormat.MIMETYPE_AUDIO_AAC }) return@inspect false
+            extractor.selectTrack(video)
+            extractor.sampleSize > 0 && extractor.sampleTime in 0..100_000
+        } ?: false
+
     fun canCopyTrim(context: Context, uri: Uri, startMs: Long): Boolean =
         inspect(context, uri) { extractor, formats ->
             if (formats.size !in 1..2 || formats.first().mime() != MediaFormat.MIMETYPE_VIDEO_AVC ||
