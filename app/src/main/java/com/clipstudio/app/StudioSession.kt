@@ -136,32 +136,37 @@ internal object StudioSession {
         }
 
     fun analyzeYouTubeParts(context: Context, link: String, layout: Layout, startMs: Long) =
-        work(context, Work.IMPORT, "Opening recording for analysis") { app ->
+        work(context, Work.IMPORT, "Opening recording for analysis", "Analysis paused · saved samples kept") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
             newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id",
                 guided = true, startMs = startMs, fastParts = true, scanFirst = true)
             scanCurrentRecording(app)
         }
 
-    fun retryPartAnalysis(context: Context) = work(context, Work.IMPORT, "Opening recording for analysis") { app ->
-        if (state.value.project?.scannedParts?.isEmpty() == true) scanCurrentRecording(app)
+    fun retryPartAnalysis(context: Context) = work(context, Work.IMPORT, "Opening recording for analysis", "Analysis paused · saved samples kept") { app ->
+        if (state.value.project?.scannedParts != null) scanCurrentRecording(app)
     }
 
     private suspend fun scanCurrentRecording(app: Context) {
         val project = state.value.project ?: return
         val link = project.youtubeLink ?: return
-        val parts = StudioMedia.scanRecording(app, link, project.guidedStartMs) { current, total ->
+        val saved = project.scannedParts ?: return
+        val parts = StudioMedia.scanRecording(app, link, project.guidedStartMs, saved, progress = { current, total ->
             withContext(Dispatchers.Main.immediate) { describe(Work.IMPORT, "Sampling audio · part $current of $total") }
-        }
-        updateProject(project.id) { it.copy(scannedParts = parts) }
-        status(if (parts.any { it.score != null }) "Choose a part to download" else
-            "Parts are ready to choose. Audio activity could not be ranked.")
+        }, checkpoint = { results ->
+            withContext(Dispatchers.Main.immediate) { updateProject(project.id) { it.copy(scannedParts = results) } }
+        })
+        status(when {
+            parts.none { it.score != null } -> "Choose by timestamp or retry the audio scan."
+            parts.any { it.needsSampling } -> "Choose a part to download or continue the audio scan."
+            else -> "Choose a part to download"
+        })
     }
 
     fun downloadScannedPart(context: Context, startMs: Long) = work(context, Work.IMPORT, "Preparing selected part") { app ->
         val project = state.value.project ?: return@work
         val selected = project.scannedParts?.firstOrNull { it.range.startMs == startMs } ?: return@work
-        if (project.parts.any { !it.part.joined && it.part.offsetMs == startMs }) return@work
+        if (project.availableParts.any { !it.part.joined && it.part.offsetMs == startMs }) return@work
         importGuidedPart(app, selected)
     }
 
@@ -219,13 +224,16 @@ internal object StudioSession {
                 publish = publish)
         } else {
             StudioMedia.downloadRecordingPart(app, project.id, link, start,
-                previous?.formatId, fast = project.fastGuidedParts, requestedEndMs = selected?.range?.endMs, progress = { progress ->
+                if (selected == null) previous?.formatId else null, fast = project.fastGuidedParts, requestedEndMs = selected?.range?.endMs, progress = { progress ->
                     scope.launch {
                         if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
                         val current = state.value.guidedDownload
                         if (!progress.newAttempt && (current?.assembling == true || progress.percent < (current?.percent ?: 0))) return@launch
                         val label = if (progress.newAttempt) "Trying resumable download for part $partNumber"
-                        else if (progress.assembling) "Assembling part $partNumber" else buildString {
+                        else if (progress.assembling) "Assembling part $partNumber" else if (progress.percent == 0 && progress.bytesFetched != null) {
+                            if (progress.bytesFetched == 0L) "Connecting for part $partNumber"
+                            else "Downloading part $partNumber · ${android.text.format.Formatter.formatFileSize(app, progress.bytesFetched)} received"
+                        } else if (progress.percent == 0) "Preparing download for part $partNumber" else buildString {
                             append("Downloading part $partNumber · ${progress.percent}%")
                             progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
                         }
@@ -526,7 +534,11 @@ internal object StudioSession {
 
     private fun addPart(app: Context, part: SourcePart) {
         val project = state.value.project ?: return
-        save(project.copy(parts = project.parts + PartReview(part)))
+        val previous = project.parts.indexOfFirst { it.released && !it.part.joined && it.part.offsetMs == part.offsetMs }
+        val parts = if (project.scannedParts != null && previous >= 0 && !part.joined) {
+            project.parts.toMutableList().apply { this[previous] = PartReview(part) }
+        } else project.parts + PartReview(part)
+        save(project.copy(parts = parts))
         if (autoAnalyze) analyze(app)
     }
 
@@ -591,7 +603,9 @@ internal object StudioSession {
         stateFlow.value = change(stateFlow.value)
     }
 
-    private fun work(context: Context, key: Work, label: String, body: suspend (Context) -> Unit) {
+    private fun work(
+        context: Context, key: Work, label: String, cancelStatus: String? = null, body: suspend (Context) -> Unit
+    ) {
         if (jobs[key] != null || Work.STORAGE in jobs) return
         val app = context.applicationContext
         initialize(app)
@@ -608,8 +622,8 @@ internal object StudioSession {
             try {
                 body(app)
             } catch (cancelled: CancellationException) {
-                if (key == Work.IMPORT && state.value.project?.scannedParts?.isEmpty() == true) {
-                    status("Analysis paused. Retry from Import.")
+                if (cancelStatus != null) {
+                    status(cancelStatus)
                 } else if (key == Work.IMPORT && state.value.project?.guidedImport == true) {
                     status("Download paused · saved pieces kept")
                 } else if (key != Work.ANALYZE || !resumeAnalysis) status("Cancelled · completed work was kept")

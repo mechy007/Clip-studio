@@ -13,6 +13,10 @@ internal data class RenderStats(
     val retried: Boolean
 )
 
+internal data class RecordingTracks(
+    val width: Int, val height: Int, val sampleRate: Int?, val channels: Int?
+)
+
 internal object FastMedia {
     fun hardwareAvc(width: Int, height: Int): String? {
         if (Build.VERSION.SDK_INT < 29) return null
@@ -41,12 +45,28 @@ internal object FastMedia {
             extractor.sampleTime >= 0 && extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
         } ?: false
 
+    fun downloadedTracks(context: Context, uri: Uri, requireAudio: Boolean): RecordingTracks? =
+        inspect(context, uri) { extractor, formats ->
+            val video = formats.indexOfFirst { it.mime()?.startsWith("video/") == true }
+            val audio = formats.firstOrNull { it.mime()?.startsWith("audio/") == true }
+            if (video < 0 || requireAudio && audio == null) return@inspect null
+            extractor.selectTrack(video)
+            if (extractor.sampleSize <= 0) return@inspect null
+            val format = formats[video]
+            val width = format.getInteger(MediaFormat.KEY_WIDTH)
+            val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+            if (width <= 0 || height <= 0) return@inspect null
+            RecordingTracks(width, height, audio?.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+                audio?.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+        }
+
     fun matchesDownloadedPart(context: Context, uri: Uri): Boolean =
         inspect(context, uri) { extractor, formats ->
             val video = formats.indexOfFirst { it.mime() == MediaFormat.MIMETYPE_VIDEO_AVC }
             if (video < 0 || formats.none { it.mime() == MediaFormat.MIMETYPE_AUDIO_AAC }) return@inspect false
             extractor.selectTrack(video)
-            extractor.sampleSize > 0 && extractor.sampleTime in 0..100_000
+            extractor.sampleSize > 0 && extractor.sampleTime in 0..100_000 &&
+                extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
         } ?: false
 
     fun canCopyTrim(context: Context, uri: Uri, startMs: Long): Boolean =

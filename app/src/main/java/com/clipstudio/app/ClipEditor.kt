@@ -606,7 +606,7 @@ internal fun ClipEditor(
                 } else {
                     Text("Choose the audio track that contains the streamer’s voice.", style = MaterialTheme.typography.bodySmall)
                     if (audioTracks == 1) {
-                        Text("This file has one audio track. Use Custom text if gameplay and voice are mixed together.",
+                        Text("This file has one audio track. Generated captions use the combined audio. Use Custom text for streamer-only captions.",
                             style = MaterialTheme.typography.bodySmall)
                     }
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -760,6 +760,8 @@ internal fun ClipEditor(
                         FilterChip(selected = normalize, onClick = { normalize = !normalize }, label = { Text("Normalize") })
                         FilterChip(selected = fades, onClick = { fades = !fades }, label = { Text("Add fades") })
                     }
+                    if (trackCount == 1) Text("Voice and gameplay volume can be adjusted separately when the source has separate tracks.",
+                        style = MaterialTheme.typography.bodySmall)
                     if (trackCount >= 2) {
                         FilterChip(selected = mix, onClick = { mix = !mix }, label = { Text("Mix first two audio tracks") })
                         if (mix) {

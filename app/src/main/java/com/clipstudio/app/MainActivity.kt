@@ -265,7 +265,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
-                    if (progress != null && !progress.assembling) {
+                    if (progress != null && progress.percent > 0 && !progress.assembling) {
                         LinearProgressIndicator(progress = { progress.percent / 100f }, modifier = Modifier.fillMaxWidth())
                     } else if (occupied) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
@@ -329,6 +329,8 @@ class MainActivity : ComponentActivity() {
                                         if (!analyzeFirst) FilterChip(selected = downloadFullFirst, enabled = !occupied,
                                             onClick = { downloadFullFirst = !downloadFullFirst },
                                             label = { Text("Download full video first") })
+                                        if (analyzeFirst) Text("Use a recording or a finished livestream replay.",
+                                            style = MaterialTheme.typography.bodySmall)
                                         if (!analyzeFirst && downloadFullFirst) Text("Downloads the whole recording once, then prepares each part on this phone.",
                                             style = MaterialTheme.typography.bodySmall)
                                         OutlinedTextField(
@@ -384,9 +386,19 @@ class MainActivity : ComponentActivity() {
                                     }) { Text("Retry analysis") }
                                 } else if (scannedParts.isNotEmpty()) {
                                     Text("Analyzed parts", style = MaterialTheme.typography.titleMedium)
-                                    Text("Parts are ranked using short audio samples. Quiet highlights may be missed.",
+                                    Text("Audio activity uses short samples. Check timestamps for quiet or visual highlights.",
                                         style = MaterialTheme.typography.bodySmall)
-                                    val ranked = scannedParts.withIndex().sortedByDescending { it.value.score ?: -1 }
+                                    if (scannedParts.any { it.needsSampling }) {
+                                        OutlinedButton(enabled = !occupied, onClick = {
+                                            StudioSession.retryPartAnalysis(this@MainActivity)
+                                            showNotificationPermission()
+                                        }) { Text("Continue audio scan") }
+                                    }
+                                    var sortByAudio by rememberSaveable { mutableStateOf(true) }
+                                    FilterChip(selected = sortByAudio, onClick = { sortByAudio = !sortByAudio },
+                                        label = { Text(if (sortByAudio) "Audio activity order" else "Timestamp order") })
+                                    val ranked = if (sortByAudio) scannedParts.withIndex().sortedByDescending { it.value.score ?: -1 }
+                                        else scannedParts.withIndex().toList()
                                     ranked.forEach { (index, result) ->
                                         val range = result.range
                                         val saved = project.parts.firstOrNull { !it.part.joined && it.part.offsetMs == range.startMs }
@@ -397,11 +409,10 @@ class MainActivity : ComponentActivity() {
                                                     ?: "Audio ranking unavailable", style = MaterialTheme.typography.bodySmall)
                                             }
                                             when {
-                                                saved == null -> OutlinedButton(enabled = !occupied, onClick = {
+                                                saved == null || saved.released -> OutlinedButton(enabled = !occupied, onClick = {
                                                     StudioSession.downloadScannedPart(this@MainActivity, range.startMs)
                                                     showNotificationPermission()
-                                                }) { Text("Download") }
-                                                saved.released -> Text("Footage removed", style = MaterialTheme.typography.labelSmall)
+                                                }) { Text(if (saved?.released == true) "Download again" else "Download") }
                                                 else -> TextButton(onClick = {
                                                     selectedPart = saved.part.uri.toString()
                                                     chosenMoment = -1L

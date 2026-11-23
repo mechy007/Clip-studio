@@ -13,7 +13,8 @@ internal fun RecordingPartWindow.downloadChunks(): List<RecordingPartWindow> =
     }.map { start -> RecordingPartWindow(start, start + minOf(DOWNLOAD_CHUNK_MS, endMs - start)) }.toList()
 
 internal data class GuidedDownloadProgress(
-    val percent: Int, val etaMs: Long?, val assembling: Boolean = false, val newAttempt: Boolean = false
+    val percent: Int, val etaMs: Long?, val assembling: Boolean = false, val newAttempt: Boolean = false,
+    val bytesFetched: Long? = null
 )
 
 internal fun guidedDownloadProgress(
@@ -31,6 +32,11 @@ internal data class GuidedDownloadPlan(
     val range: RecordingPartWindow, val recordingEndMs: Long, val format: String
 )
 
+internal fun savedRecordingRange(start: Long, recordingEnd: Long, savedEnd: Long?, requestedEnd: Long?): RecordingPartWindow? {
+    val end = minOf(recordingEnd, savedEnd ?: recordingEnd, requestedEnd ?: recordingEnd)
+    return if (end > start) nextRecordingPart(start, end) else null
+}
+
 internal class GuidedDownloadFiles(val directory: File) {
     private val settings = AtomicFile(File(directory, "plan.json"))
     val output = File(directory, "part.mp4")
@@ -39,19 +45,20 @@ internal class GuidedDownloadFiles(val directory: File) {
 
     fun chunk(index: Int) = File(directory, "chunk-$index.mp4")
 
-    fun load(start: Long): GuidedDownloadPlan? {
+    fun load(start: Long, requestedEnd: Long? = null): GuidedDownloadPlan? {
         val data = try {
             JSONObject(String(settings.readFully(), Charsets.UTF_8))
         } catch (_: FileNotFoundException) {
             return null
         }
         val duration = data.getLong("recordingEnd")
-        val range = requireNotNull(nextRecordingPart(start, duration))
+        val end = data.optLong("partEnd", duration)
+        val range = savedRecordingRange(start, duration, end, requestedEnd) ?: return null
         return GuidedDownloadPlan(range, duration, data.getString("format"))
     }
 
     fun save(plan: GuidedDownloadPlan) {
-        val data = JSONObject().put("recordingEnd", plan.recordingEndMs).put("format", plan.format)
+        val data = JSONObject().put("recordingEnd", plan.recordingEndMs).put("partEnd", plan.range.endMs).put("format", plan.format)
         val stream = settings.startWrite()
         try {
             stream.write(data.toString().toByteArray(Charsets.UTF_8))

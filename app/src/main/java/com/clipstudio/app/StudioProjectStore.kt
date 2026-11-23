@@ -156,8 +156,21 @@ internal class StudioProjectStore(context: Context) {
                 val start = row.optLong("start", -1)
                 val end = row.optLong("end", -1)
                 if (start < 0 || end <= start || end - start > RECORDING_PART_MS) return@mapNotNull null
+                val measurements = row.optJSONArray("measurements")?.let { items ->
+                    (0 until items.length()).mapNotNull readMeasurement@{ position ->
+                        val sample = items.optJSONObject(position) ?: return@readMeasurement null
+                        val from = sample.optLong("start", -1)
+                        val to = sample.optLong("end", -1)
+                        val rms = sample.optDouble("rms").toFloat()
+                        val peak = sample.optDouble("peak").toFloat()
+                        if (from < start || to > end || to <= from || rms !in 0f..1f || peak !in 0f..1f) {
+                            return@readMeasurement null
+                        }
+                        AudioEnergyWindow(from, to, rms, peak)
+                    }.distinctBy { it.startMs }
+                }.orEmpty()
                 RecordingScanPart(RecordingPartWindow(start, end), row.optInt("score", -1).takeIf { it in 0..100 },
-                    row.optInt("samples"))
+                    row.optInt("samples"), measurements)
             }
         }
         return StudioProject(root.getString("name"), Layout.valueOf(root.getString("layout")), parts, queue,
@@ -214,6 +227,10 @@ internal class StudioProjectStore(context: Context) {
             .put("scannedParts", project.scannedParts?.let { parts -> JSONArray(parts.map { item ->
                 JSONObject().put("start", item.range.startMs).put("end", item.range.endMs)
                     .put("score", item.score ?: -1).put("samples", item.samples)
+                    .put("measurements", JSONArray(item.measurements.map { sample ->
+                        JSONObject().put("start", sample.startMs).put("end", sample.endMs)
+                            .put("rms", sample.rms.toDouble()).put("peak", sample.peak.toDouble())
+                    }))
             }) })
             .put("drafts", JSONArray(project.drafts.map { (id, draft) -> draft.json().put("id", id) }))
             .put("framing", project.framing?.let {
