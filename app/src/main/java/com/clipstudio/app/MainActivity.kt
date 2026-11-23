@@ -172,7 +172,7 @@ class MainActivity : ComponentActivity() {
                     Button(
                         enabled = !exporting,
                         onClick = {
-                            StudioSession.export(this@MainActivity, state.queue)
+                            StudioSession.export(this@MainActivity, state.queue, fromQueue = true)
                             showNotificationPermission()
                         }
                     ) { Text("Export ${state.queue.size} clips") }
@@ -180,7 +180,16 @@ class MainActivity : ComponentActivity() {
                 if (state.exports.isNotEmpty()) {
                     Text("${state.exports.size} MP4 ${if (state.exports.size == 1) "ready" else "files ready"}",
                         style = MaterialTheme.typography.titleMedium)
-                    OutlinedButton(onClick = { share(state.exports) }) { Text("Share ${if (state.exports.size == 1) "MP4" else "clips"}") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = {
+                            val play = Intent(Intent.ACTION_VIEW).setDataAndType(state.exports.last(), "video/mp4")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            runCatching { startActivity(Intent.createChooser(play, "Open exported clip")) }
+                        }) { Text("Open MP4") }
+                        OutlinedButton(onClick = { share(state.exports) }) {
+                            Text("Share ${if (state.exports.size == 1) "MP4" else "clips"}")
+                        }
+                    }
                 }
             }
         }

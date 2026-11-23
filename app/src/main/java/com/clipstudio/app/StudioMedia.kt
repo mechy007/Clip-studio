@@ -15,13 +15,14 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URI
 import java.util.Locale
 import java.util.UUID
-import kotlin.coroutines.resume
 
 internal data class SourcePart(val uri: Uri, val offsetMs: Long, val durationMs: Long)
 
@@ -168,13 +169,19 @@ internal object StudioMedia {
         }
     }
 
-    private suspend fun runFfmpeg(arguments: Array<String>): Boolean =
-        suspendCancellableCoroutine { continuation ->
-            val session = FFmpegKit.executeWithArgumentsAsync(arguments) { completed ->
-                continuation.resume(ReturnCode.isSuccess(completed.returnCode))
-            }
-            continuation.invokeOnCancellation { FFmpegKit.cancel(session.sessionId) }
+    private suspend fun runFfmpeg(arguments: Array<String>): Boolean {
+        val done = CompletableDeferred<Boolean>()
+        val session = FFmpegKit.executeWithArgumentsAsync(arguments) { completed ->
+            done.complete(ReturnCode.isSuccess(completed.returnCode))
         }
+        return try {
+            done.await()
+        } catch (cancelled: CancellationException) {
+            FFmpegKit.cancel(session.sessionId)
+            withContext(NonCancellable) { done.await() }
+            throw cancelled
+        }
+    }
 
     private fun seconds(ms: Long) = String.format(Locale.US, "%.3f", ms / 1000.0)
 }

@@ -14,7 +14,8 @@ internal fun rankHighlights(
     val clipDuration = targetMs.coerceIn(2_000, durationMs)
     val reference = AudioSignalScorer.reference(energy)
     val typical = energy.map { it.rms }.sorted().let { it.getOrNull(it.size / 2) } ?: 0f
-    val typicalMotion = visual.map { it.change }.sorted().let { it.getOrNull(it.size / 2) } ?: 0f
+    val motionSamples = visual.map { it.change }.sorted()
+    val typicalMotion = if (motionSamples.size >= 5) motionSamples[motionSamples.size * 2 / 5] else 0f
     val audioBySecond = energy.associateBy { it.startMs / 1_000 }
     val reactionBySecond = reactions.associateBy { it.startMs / 1_000 }
     val visualBySecond = visual.associateBy { it.timeMs / 1_000 }

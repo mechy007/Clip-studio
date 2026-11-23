@@ -6,13 +6,13 @@ Clip Studio is an Android-only editor for turning recorded videos into short cli
 
 1. Paste a YouTube recording link or open a local video. Select the initial layout before import.
 2. Review ready sections and suggested highlights. The phone looks for relative loudness, laughter, shouting, cheering, and visual activity. Suggestions describe the signal that triggered them.
-3. Trim the clip and choose a layout. The 50/50 layout puts the facecam above gameplay. Drag or pinch each panel on the framing preview. Use Play source to review the original recording.
+3. Trim the clip and choose a layout. The 50/50 layout puts the facecam above gameplay. Vertical fill, vertical fit, square, and landscape are also available. Drag or pinch each panel on the framing preview. Use Play source to review the original recording.
 4. Generate offline captions in auto-detect mode or a selected language, edit their text, and choose Clean, Karaoke, or Pop.
 5. Export one MP4 or queue up to ten. Choose 720p or 1080p, with optional muting. Files go to `Movies/Clip Studio` and can be shared from the app.
 
 Compatible YouTube recordings yield independently playable sections as the source arrives. Sections can be analyzed, trimmed, and exported while the download continues. A recording without a compatible progressive format can use the full-file importer. A clip within the progressive view is limited to its selected section, and YouTube availability varies by recording.
 
-Grant notification permission to see import, analysis, and export progress outside the app. The latest imported project, completed sections, and highlight suggestions can be reopened after a restart. Interrupted transfers must be started again. Caption edits and the export queue are kept during the current app session. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
+Grant notification permission to see import, analysis, and export progress outside the app. The latest imported project, completed sections, and highlight suggestions can be reopened after a restart. Interrupted transfers must be started again. Queued clips and their selected caption styles are restored with the project. Unqueued caption edits are kept during the current app session. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
 
 ## Build
 

@@ -23,9 +23,10 @@ internal data class StudioState(
     val jobs: Map<Work, String> = emptyMap(),
     val status: String = "",
     val exports: List<Uri> = emptyList(),
-    val queue: List<ExportClip> = emptyList(),
     val transcripts: Map<Uri, List<TranscriptSegment>> = emptyMap()
-)
+) {
+    val queue: List<ExportClip> get() = project?.queue.orEmpty()
+}
 
 internal data class ExportClip(
     val part: SourcePart, val start: Long, val end: Long,
@@ -121,18 +122,23 @@ internal object StudioSession {
         status(if (transcript.isEmpty()) "No speech found in this clip" else "Captions ready to edit")
     }
 
-    fun export(context: Context, clips: List<ExportClip>) = work(context, Work.EXPORT, "Preparing export") { app ->
-        update { it.copy(exports = emptyList()) }
-        for ((index, clip) in clips.withIndex()) {
-            describe(Work.EXPORT, "Rendering ${index + 1} of ${clips.size}")
-            val uri = StudioMedia.export(
-                app, clip.part, clip.start, clip.end, clip.layout, clip.camera, clip.gameplay,
-                clip.width, clip.muted, clip.captions, clip.preset
-            )
-            update { it.copy(exports = it.exports + uri) }
+    fun export(context: Context, clips: List<ExportClip>, fromQueue: Boolean = false) =
+        work(context, Work.EXPORT, "Preparing export") { app ->
+            update { it.copy(exports = emptyList()) }
+            for ((index, clip) in clips.withIndex()) {
+                describe(Work.EXPORT, "Rendering ${index + 1} of ${clips.size}")
+                val uri = StudioMedia.export(
+                    app, clip.part, clip.start, clip.end, clip.layout, clip.camera, clip.gameplay,
+                    clip.width, clip.muted, clip.captions, clip.preset
+                )
+                update { it.copy(exports = it.exports + uri) }
+                if (fromQueue) {
+                    val project = state.value.project
+                    if (project != null) save(project.copy(queue = project.queue - clip))
+                }
+            }
+            status(if (clips.size == 1) "Saved to Movies/Clip Studio" else "${clips.size} clips saved to Movies/Clip Studio")
         }
-        status(if (clips.size == 1) "Saved to Movies/Clip Studio" else "${clips.size} clips saved to Movies/Clip Studio")
-    }
 
     fun editTranscript(uri: Uri, index: Int, text: String) {
         val transcript = state.value.transcripts[uri] ?: return
@@ -144,13 +150,16 @@ internal object StudioSession {
         update { it.copy(transcripts = it.transcripts + (uri to updated)) }
     }
 
-    fun queue(clip: ExportClip) = update { state ->
-        if (clip in state.queue || state.queue.size >= 10) state
-        else state.copy(queue = state.queue + clip, status = "Clip added to export queue")
+    fun queue(clip: ExportClip) {
+        val project = state.value.project ?: return
+        if (clip in project.queue || project.queue.size >= 10) return
+        save(project.copy(queue = project.queue + clip))
+        status("Clip added to export queue")
     }
 
-    fun removeQueued(index: Int) = update { state ->
-        state.copy(queue = state.queue.filterIndexed { position, _ -> position != index })
+    fun removeQueued(index: Int) {
+        val project = state.value.project ?: return
+        save(project.copy(queue = project.queue.filterIndexed { position, _ -> position != index }))
     }
 
     fun changeLayout(layout: Layout) {
@@ -174,7 +183,7 @@ internal object StudioSession {
 
     private fun newProject(name: String, layout: Layout) {
         autoAnalyze = true
-        update { it.copy(project = StudioProject(name, layout, emptyList()), exports = emptyList(), queue = emptyList(), transcripts = emptyMap(), status = "") }
+        update { it.copy(project = StudioProject(name, layout, emptyList()), exports = emptyList(), transcripts = emptyMap(), status = "") }
     }
 
     private fun save(project: StudioProject) {

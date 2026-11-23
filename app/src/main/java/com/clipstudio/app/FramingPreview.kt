@@ -3,7 +3,12 @@ package com.clipstudio.app
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,12 +19,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import kotlin.math.min
 
 @Composable
@@ -27,7 +34,8 @@ internal fun FramingPreview(
     bitmap: Bitmap?, layout: Layout, camera: Crop, game: Crop,
     onCamera: (Crop) -> Unit, onGame: (Crop) -> Unit
 ) {
-    val aspect = if (layout == Layout.Landscape) 16f / 9f else 9f / 16f
+    val (width, height) = layout.dimensions(720)
+    val aspect = width.toFloat() / height
     val image = remember(bitmap) { bitmap?.asImageBitmap() }
     val activeCamera = rememberUpdatedState(camera)
     val activeGame = rememberUpdatedState(game)
@@ -40,26 +48,52 @@ internal fun FramingPreview(
             Canvas(
                 Modifier.heightIn(max = 380.dp).aspectRatio(aspect, matchHeightConstraintsFirst = layout != Layout.Landscape)
                     .background(Color(0xFF0D1015)).pointerInput(layout, image.width, image.height) {
-                        detectTransformGestures { centroid, pan, zoom, _ ->
-                            if (layout != Layout.Split && layout != Layout.Fill) return@detectTransformGestures
-                            val upper = layout == Layout.Split && centroid.y < size.height / 2f
-                            val crop = if (upper) activeCamera.value else activeGame.value
+                        if (layout != Layout.Split && layout != Layout.Fill && layout != Layout.Square) return@pointerInput
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val upper = layout == Layout.Split && down.position.y < size.height / 2f
                             val height = if (layout == Layout.Split) size.height / 2f else size.height.toFloat()
                             val frameAspect = size.width / height
-                            val before = cropWindow(image.width, image.height, frameAspect, crop)
-                            val nextZoom = (crop.zoom * zoom).coerceIn(1f, 4f)
-                            val after = cropWindow(image.width, image.height, frameAspect, crop.copy(zoom = nextZoom))
-                            val left = before.x + before.width * (centroid.x / size.width) -
-                                after.width * (centroid.x / size.width) - pan.x * before.width / size.width
-                            val fractionY = (centroid.y - if (layout == Layout.Split && !upper) height else 0f) / height
-                            val top = before.y + before.height * fractionY -
-                                after.height * fractionY - pan.y * before.height / height
-                            val next = Crop(
-                                if (after.width == image.width) crop.x else (left / (image.width - after.width)).coerceIn(0f, 1f),
-                                if (after.height == image.height) crop.y else (top / (image.height - after.height)).coerceIn(0f, 1f),
-                                nextZoom
-                            )
-                            if (upper) cameraAction.value(next) else gameAction.value(next)
+                            var accumulatedPan = Offset.Zero
+                            var accumulatedZoom = 1f
+                            var moved = false
+                            do {
+                                val event = awaitPointerEvent()
+                                if (event.changes.any { it.isConsumed }) break
+                                val pan = event.calculatePan()
+                                val zoom = event.calculateZoom()
+                                var gesturePan = pan
+                                var gestureZoom = zoom
+                                if (!moved) {
+                                    accumulatedPan += pan
+                                    accumulatedZoom *= zoom
+                                    val zoomPixels = abs(1f - accumulatedZoom) * event.calculateCentroidSize(false)
+                                    moved = accumulatedPan.getDistance() > viewConfiguration.touchSlop ||
+                                        zoomPixels > viewConfiguration.touchSlop
+                                    gesturePan = accumulatedPan
+                                    gestureZoom = accumulatedZoom
+                                }
+                                val centroid = event.calculateCentroid(useCurrent = false)
+                                if (moved && centroid.isSpecifiedPoint()) {
+                                    val crop = if (upper) activeCamera.value else activeGame.value
+                                    val before = cropWindow(image.width, image.height, frameAspect, crop)
+                                    val nextZoom = (crop.zoom * gestureZoom).coerceIn(1f, 4f)
+                                    val after = cropWindow(image.width, image.height, frameAspect, crop.copy(zoom = nextZoom))
+                                    val fractionX = centroid.x / size.width
+                                    val fractionY = (centroid.y - if (layout == Layout.Split && !upper) height else 0f) / height
+                                    val left = before.x + (before.width - after.width) * fractionX -
+                                        gesturePan.x * before.width / size.width
+                                    val top = before.y + (before.height - after.height) * fractionY -
+                                        gesturePan.y * before.height / height
+                                    val next = Crop(
+                                        if (after.width == image.width) crop.x else (left / (image.width - after.width)).coerceIn(0f, 1f),
+                                        if (after.height == image.height) crop.y else (top / (image.height - after.height)).coerceIn(0f, 1f),
+                                        nextZoom
+                                    )
+                                    if (upper) cameraAction.value(next) else gameAction.value(next)
+                                    event.changes.forEach { it.consume() }
+                                }
+                            } while (event.changes.any { it.pressed })
                         }
                     }
             ) {
@@ -76,7 +110,7 @@ internal fun FramingPreview(
                         panel(0, height / 2, camera)
                         panel(height / 2, height - height / 2, game)
                     }
-                    Layout.Fill -> panel(0, height, game)
+                    Layout.Fill, Layout.Square -> panel(0, height, game)
                     Layout.Fit, Layout.Landscape -> {
                         val scale = min(width.toFloat() / image.width, height.toFloat() / image.height)
                         val content = IntSize((image.width * scale).toInt(), (image.height * scale).toInt())
@@ -88,3 +122,5 @@ internal fun FramingPreview(
         }
     }
 }
+
+private fun Offset.isSpecifiedPoint() = this != Offset.Unspecified && x.isFinite() && y.isFinite()

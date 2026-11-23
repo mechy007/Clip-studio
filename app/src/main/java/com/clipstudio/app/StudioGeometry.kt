@@ -3,7 +3,7 @@ package com.clipstudio.app
 import kotlin.math.roundToLong
 
 internal enum class Layout(val label: String) {
-    Split("50/50 facecam"), Fill("Vertical fill"), Fit("Vertical fit"), Landscape("Landscape")
+    Split("50/50 facecam"), Fill("Vertical fill"), Fit("Vertical fit"), Landscape("Landscape"), Square("Square")
 }
 
 internal data class Crop(val x: Float, val y: Float, val zoom: Float = 1f)
@@ -38,14 +38,18 @@ internal fun videoFilter(layout: Layout, camera: Crop, game: Crop, resolution: I
     return when (layout) {
         Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera)}[top];" +
             "[b]${fill(outputWidth, panelHeight, game)}[bottom];[top][bottom]vstack[out]"
-        Layout.Fill -> "[0:v]${fill(outputWidth, outputHeight, game)}[out]"
+        Layout.Fill, Layout.Square -> "[0:v]${fill(outputWidth, outputHeight, game)}[out]"
         Layout.Fit, Layout.Landscape -> "[0:v]scale=$outputWidth:$outputHeight:force_original_aspect_ratio=decrease:" +
             "force_divisible_by=2,pad=$outputWidth:$outputHeight:(ow-iw)/2:(oh-ih)/2,setsar=1[out]"
     }
 }
 
 internal fun Layout.dimensions(width: Int): Pair<Int, Int> =
-    if (this == Layout.Landscape) width * 16 / 9 to width else width to width * 16 / 9
+    when (this) {
+        Layout.Landscape -> width * 16 / 9 to width
+        Layout.Square -> width to width
+        else -> width to width * 16 / 9
+    }
 
 internal data class CropWindow(val x: Int, val y: Int, val width: Int, val height: Int)
 

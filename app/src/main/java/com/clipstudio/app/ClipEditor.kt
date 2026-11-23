@@ -118,7 +118,7 @@ internal fun ClipEditor(review: PartReview, layout: Layout, state: StudioState, 
         }
     } else {
         FramingPreview(frame, layout, camera, gameplay, { camera = it }, { gameplay = it })
-        if (layout in listOf(Layout.Split, Layout.Fill)) Text("Drag to reposition · pinch to zoom",
+        if (layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) Text("Drag to reposition · pinch to zoom",
             style = MaterialTheme.typography.bodySmall)
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -141,7 +141,7 @@ internal fun ClipEditor(review: PartReview, layout: Layout, state: StudioState, 
         }
     }
     if (layout == Layout.Split && faceStatus.isNotBlank()) Text(faceStatus)
-    if (layout in listOf(Layout.Split, Layout.Fill)) {
+    if (layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
         TextButton(onClick = { camera = CameraDefault; gameplay = GameplayDefault }) { Text("Reset framing") }
     }
     Text("Trim · ${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}")
