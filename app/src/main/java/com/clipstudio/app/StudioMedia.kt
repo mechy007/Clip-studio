@@ -152,6 +152,76 @@ internal object StudioMedia {
         }
     }
 
+    /** Fetch a single bounded range and publish only after FFmpeg has closed the MP4. */
+    suspend fun downloadRecordingPart(
+        context: Context, link: String, startMs: Long, previousFormat: String?,
+        publish: suspend (SourcePart, Boolean) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val id = YouTubeLinkClassifier.parseVideoId(link)
+        val media = runInterruptible {
+            YouTubeVideoImporter.prepare(context)
+            val format = previousFormat?.also {
+                check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
+            } ?: "bv[protocol=https][vcodec^=avc1][height<=1080]+ba[protocol=https][acodec^=mp4a]/" +
+                "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
+            val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$id")
+                .addOption("--no-playlist")
+                .addOption("--no-warnings")
+                .addOption("--ignore-no-formats-error")
+                .addOption("--socket-timeout", 20)
+                .addOption("--dump-single-json")
+                .addOption("-f", format)
+            JSONObject(YoutubeDL.execute(request).out.trim())
+        }
+        when (media.optString("live_status")) {
+            "is_live", "is_upcoming", "post_live" -> error(
+                "30-minute parts are available when YouTube finishes processing the livestream replay."
+            )
+        }
+        val durationMs = media.optDouble("duration", 0.0).let { if (it.isFinite()) (it * 1000).toLong() else 0L }
+        check(durationMs > 0) { "YouTube has not provided the recording length yet. Try again when the replay is ready." }
+        val range = nextRecordingPart(startMs, durationMs) ?: return@withContext
+        val selectedFormat = media.optString("format_id")
+        check(selectedFormat.isNotBlank() && (previousFormat == null || selectedFormat == previousFormat)) {
+            "The saved YouTube format is unavailable. Completed parts are still available."
+        }
+        val separate = media.optJSONArray("requested_formats")
+        val inputs = if (separate != null && separate.length() == 2) {
+            List(2) { separate.getJSONObject(it).optString("url") }
+        } else listOf(media.optString("url"))
+        check(inputs.all { input ->
+            runCatching { URI(input) }.getOrNull()?.let { it.scheme == "https" && it.host != null } == true
+        }) { "No compatible video and audio streams were available for this recording." }
+
+        val folder = File(context.filesDir, "imports").apply { mkdirs() }
+        val output = File.createTempFile("studio-recording-part-", ".mp4", folder)
+        var kept = false
+        try {
+            val seek = if (range.startMs == 0L) emptyList() else listOf("-ss", seconds(range.startMs))
+            val inputArgs = inputs.flatMap { url -> listOf("-rw_timeout", "20000000") + seek + listOf("-i", url) }
+            val durationArgs = listOf("-t", seconds(range.lengthMs))
+            val codec = listOf("-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart")
+            val args = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + durationArgs +
+                listOf("-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0") + codec + output.absolutePath
+            check(runFfmpeg(args.toTypedArray()) && YouTubeDownloadValidation.isValidMp4(output)) {
+                "This part could not finish downloading. Retry to start from the same point."
+            }
+            val uri = Uri.fromFile(output)
+            val actualDuration = duration(context, uri)
+            check(abs(actualDuration - range.lengthMs) <= minOf(1500L, range.lengthMs / 5)) {
+                "The downloaded part is incomplete. Retry to start from the same point."
+            }
+            currentCoroutineContext().ensureActive()
+            withContext(NonCancellable) {
+                publish(SourcePart(uri, range.startMs, actualDuration, range.endMs, selectedFormat), range.endMs == durationMs)
+                kept = true
+            }
+        } finally {
+            if (!kept) output.delete()
+        }
+    }
+
     suspend fun join(context: Context, sections: List<SourcePart>): SourcePart = withContext(Dispatchers.IO) {
         require(sections.size == 2 && sections.all { it.uri.scheme == "file" && !it.joined })
         val first = sections.first()

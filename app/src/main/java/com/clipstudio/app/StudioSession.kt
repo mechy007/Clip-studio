@@ -30,6 +30,8 @@ internal data class StudioState(
     val library: StudioLibrary = StudioLibrary(),
     val joined: SourcePart? = null,
     val joinRevision: Long = 0,
+    val guidedPart: SourcePart? = null,
+    val guidedExportRevision: Int = 0,
     val storageWarning: String? = null,
     val playback: Pair<ExportClip, Uri>? = null,
     val queueExportActive: Boolean = false,
@@ -111,21 +113,45 @@ internal object StudioSession {
             status("Video ready")
         }
 
-    fun importYouTube(context: Context, link: String, layout: Layout) =
+    fun importYouTube(context: Context, link: String, layout: Layout, guided: Boolean = false) =
         work(context, Work.IMPORT, "Opening YouTube recording") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
-            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id")
-            importRecording(app, link)
+            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided)
+            if (guided) importGuidedPart(app) else importRecording(app, link)
         }
 
     fun resume(context: Context) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
         val project = state.value.project ?: return@work
         val link = project.youtubeLink ?: return@work
-        if (!project.importComplete) importRecording(app, link)
+        if (!project.importComplete) {
+            if (project.guidedImport) importGuidedPart(app) else importRecording(app, link)
+        }
+    }
+
+    private suspend fun importGuidedPart(app: Context) {
+        val project = state.value.project ?: return
+        val link = project.youtubeLink ?: return
+        val previous = project.latestSourcePart
+        val partNumber = project.parts.count { !it.part.joined } + 1
+        describe(Work.IMPORT, "Downloading part $partNumber")
+        var downloaded = false
+        StudioMedia.downloadRecordingPart(app, link, previous?.nextOffsetMs ?: 0L, previous?.formatId) { part, last ->
+            withContext(Dispatchers.Main.immediate) {
+                addPart(app, part)
+                if (last) state.value.project?.let { save(it.copy(importComplete = true)) }
+                update { it.copy(guidedPart = part) }
+                status(if (last) "Final part ready to clip" else "Part $partNumber ready. Download paused.")
+                downloaded = true
+            }
+        }
+        if (!downloaded) {
+            state.value.project?.let { save(it.copy(importComplete = true)) }
+            status("All parts downloaded")
+        }
     }
 
     private suspend fun importRecording(app: Context, link: String) {
-        val last = state.value.project?.parts?.map { it.part }?.filter { !it.joined }?.maxByOrNull { it.nextOffsetMs }
+        val last = state.value.project?.latestSourcePart
         val offset = last?.nextOffsetMs ?: 0L
         val segmented = try {
             StudioMedia.downloadInParts(app, link, offset, last?.formatId) { part ->
@@ -248,6 +274,7 @@ internal object StudioSession {
             }
             update { it.copy(queueExportActive = fromQueue) }
             var count = 0
+            var exportedLatestPart = false
             while (true) {
                 val clip = if (fromQueue) state.value.library.projects.firstOrNull { it.id == source.id }
                     ?.queue?.firstOrNull() else clips.getOrNull(count)
@@ -267,7 +294,11 @@ internal object StudioSession {
                         }
                     }
                 }
+                if (clip.part == source.latestSourcePart) exportedLatestPart = true
                 count++
+            }
+            if (source.guidedImport && !source.importComplete && exportedLatestPart) {
+                update { it.copy(guidedExportRevision = it.guidedExportRevision + 1) }
             }
             if (count > 0) status(if (count == 1) "Saved to Movies/Clip Studio" else "$count clips saved to Movies/Clip Studio")
         }
@@ -332,7 +363,7 @@ internal object StudioSession {
         if (jobs.isNotEmpty()) return
         val project = state.value.library.projects.firstOrNull { it.id == id } ?: return
         clearPlayback()
-        update { it.copy(exports = project.exports, transcripts = emptyMap(), joined = null, status = "") }
+        update { it.copy(exports = project.exports, transcripts = emptyMap(), joined = null, guidedPart = null, status = "") }
         save(project)
     }
 
@@ -342,11 +373,11 @@ internal object StudioSession {
         persist(library.copy(presets = presets.take(12)))
     }
 
-    private fun newProject(name: String, layout: Layout, link: String? = null) {
+    private fun newProject(name: String, layout: Layout, link: String? = null, guided: Boolean = false) {
         autoAnalyze = true
         clearPlayback()
-        update { it.copy(exports = emptyList(), transcripts = emptyMap(), joined = null, status = "") }
-        save(StudioProject(name, layout, emptyList(), youtubeLink = link))
+        update { it.copy(exports = emptyList(), transcripts = emptyMap(), joined = null, guidedPart = null, status = "") }
+        save(StudioProject(name, layout, emptyList(), youtubeLink = link, guidedImport = guided))
     }
 
     private fun save(project: StudioProject) {

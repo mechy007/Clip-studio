@@ -6,6 +6,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImportedWorkflowTest {
+    @Test fun guidedRecordingStartsAtTheLastCompletedBoundary() {
+        val duration = 75 * 60_000L
+        val first = requireNotNull(nextRecordingPart(0, duration))
+        val second = requireNotNull(nextRecordingPart(first.endMs, duration))
+        val tail = requireNotNull(nextRecordingPart(second.endMs, duration))
+        assertEquals(RecordingPartWindow(0, 30 * 60_000L), first)
+        assertEquals(RecordingPartWindow(first.endMs, 60 * 60_000L), second)
+        assertEquals(15 * 60_000L, tail.lengthMs)
+        assertEquals(duration, tail.endMs)
+        assertEquals(null, nextRecordingPart(tail.endMs, duration))
+    }
+
+    @Test fun exactlyThirtyMinutesNeedsOnlyOnePart() {
+        val part = requireNotNull(nextRecordingPart(0, RECORDING_PART_MS))
+        assertEquals(RECORDING_PART_MS, part.lengthMs)
+        assertEquals(null, nextRecordingPart(part.endMs, RECORDING_PART_MS))
+    }
+
     @Test fun selectsVisualActionWithoutAudioOrSpeech() {
         val moments = rankHighlights(90_000, emptyList(), emptyList(),
             listOf(VisualSample(12_000, .03f), VisualSample(30_000, .52f), VisualSample(60_000, .44f)))
