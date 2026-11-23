@@ -15,8 +15,12 @@ internal data class StudioProject(
     val id: String = UUID.randomUUID().toString(),
     val youtubeLink: String? = null, val importComplete: Boolean = false,
     val mode: HighlightMode = HighlightMode.BALANCED, val exports: List<Uri> = emptyList(),
-    val renderStats: Map<Uri, RenderStats> = emptyMap()
-)
+    val renderStats: Map<Uri, RenderStats> = emptyMap(),
+    val guidedImport: Boolean = false
+) {
+    val latestSourcePart: SourcePart? get() = parts.asSequence().map { it.part }
+        .filter { !it.joined }.maxByOrNull { it.nextOffsetMs }
+}
 
 internal data class CreatorPreset(
     val name: String, val layout: Layout, val camera: Crop, val game: Crop,
@@ -95,7 +99,7 @@ internal class StudioProjectStore(context: Context) {
             root.optString("id", UUID.randomUUID().toString()),
             root.optString("youtube", "").takeIf { it.isNotEmpty() },
             root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
-            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats)
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, root.optBoolean("guidedImport"))
     }
 
     fun save(library: StudioLibrary) {
@@ -138,7 +142,7 @@ internal class StudioProjectStore(context: Context) {
         return JSONObject().put("name", project.name).put("layout", project.layout.name)
             .put("id", project.id).put("youtube", project.youtubeLink.orEmpty()).put("complete", project.importComplete)
             .put("mode", project.mode.name).put("exports", JSONArray(project.exports.map(Uri::toString))).put("renderStats", timings)
-            .put("parts", rows).put("queue", queue)
+            .put("parts", rows).put("queue", queue).put("guidedImport", project.guidedImport)
     }
 
     private fun CreatorPreset.json() = JSONObject().put("name", name).put("layout", layout.name)

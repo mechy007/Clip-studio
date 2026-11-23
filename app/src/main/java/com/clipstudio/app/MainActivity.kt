@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -102,6 +103,10 @@ class MainActivity : ComponentActivity() {
         var exportRequest by rememberSaveable { mutableStateOf(0) }
         val pages = rememberSaveableStateHolder()
         var link by rememberSaveable { mutableStateOf("") }
+        var guidedImport by rememberSaveable { mutableStateOf(false) }
+        var seenGuidedPart by rememberSaveable { mutableStateOf<String?>(null) }
+        var nextPartDialog by rememberSaveable { mutableStateOf(false) }
+        var seenGuidedExport by remember { mutableStateOf(state.guidedExportRevision) }
         var incomingLayout by rememberSaveable { mutableStateOf(Layout.Split) }
         var selectedPart by rememberSaveable { mutableStateOf<String?>(null) }
         var chosenMoment by rememberSaveable { mutableStateOf(-1L) }
@@ -135,8 +140,46 @@ class MainActivity : ComponentActivity() {
             }
         }
         val exporting = Work.EXPORT in state.jobs
+        val latestGuidedPart = project?.takeIf { it.guidedImport }?.latestSourcePart
+        val guidedPending = project?.guidedImport == true && !project.importComplete
+        val nextPartNumber = (project?.parts?.count { !it.part.joined } ?: 0) + 1
+        val canDownloadPart = guidedPending && !exporting && Work.IMPORT !in state.jobs &&
+            Work.JOIN !in state.jobs && Work.CAPTIONS !in state.jobs && Work.PREVIEW !in state.jobs
+        fun downloadNextPart() {
+            nextPartDialog = false
+            StudioSession.resume(this@MainActivity)
+            showNotificationPermission()
+        }
+        LaunchedEffect(state.guidedPart) {
+            state.guidedPart?.uri?.toString()?.takeIf { it != seenGuidedPart }?.let {
+                seenGuidedPart = it
+                selectedPart = it
+                chosenMoment = -1L
+                tab = StudioTab.Editor
+            }
+        }
+        LaunchedEffect(state.guidedExportRevision, canDownloadPart) {
+            if (canDownloadPart && state.guidedExportRevision != seenGuidedExport) {
+                seenGuidedExport = state.guidedExportRevision
+                nextPartDialog = true
+            }
+        }
+        LaunchedEffect(project?.id) {
+            seenGuidedExport = state.guidedExportRevision
+            nextPartDialog = false
+        }
         val selected = project?.parts?.find { it.part.uri.toString() == selectedPart }
+            ?: project?.parts?.find { it.part == latestGuidedPart }
             ?: project?.parts?.firstOrNull()
+        if (nextPartDialog && canDownloadPart) {
+            AlertDialog(
+                onDismissRequest = { nextPartDialog = false },
+                title = { Text("Download part $nextPartNumber?") },
+                text = { Text("You can download the next 30 minutes now or keep clipping this part.") },
+                confirmButton = { TextButton(onClick = ::downloadNextPart) { Text("Download next part") } },
+                dismissButton = { TextButton(onClick = { nextPartDialog = false }) { Text("Keep editing") } }
+            )
+        }
         val suggestions = remember(project?.parts) {
             project?.parts.orEmpty().flatMap { review ->
                 review.highlights.orEmpty().map { review.part to it }
@@ -232,16 +275,20 @@ class MainActivity : ComponentActivity() {
                                         value = link, onValueChange = { link = it }, singleLine = true,
                                         enabled = !occupied, label = { Text("YouTube recording URL") }, modifier = Modifier.fillMaxWidth()
                                     )
+                                    FilterChip(selected = guidedImport, enabled = !occupied,
+                                        onClick = { guidedImport = !guidedImport }, label = { Text("30-minute parts") })
+                                    if (guidedImport) Text("Download one part at a time. Works with finished livestream replays.",
+                                        style = MaterialTheme.typography.bodySmall)
                                     Button(
                                         enabled = !occupied && YouTubeLinkClassifier.isYouTubeUrl(link),
                                         modifier = Modifier.fillMaxWidth(),
                                         onClick = {
                                             selectedPart = null
                                             chosenMoment = -1L
-                                            StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout)
+                                            StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout, guidedImport)
                                             showNotificationPermission()
                                         }
-                                    ) { Text("Import & find highlights") }
+                                    ) { Text(if (guidedImport) "Download part 1" else "Import & find highlights") }
                                 }
                             }
                             var importSettings by rememberSaveable { mutableStateOf(false) }
@@ -257,7 +304,11 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
-                            if (project?.youtubeLink != null && !project.importComplete && Work.IMPORT !in state.jobs) {
+                            if (guidedPending) {
+                                OutlinedButton(enabled = canDownloadPart, onClick = ::downloadNextPart) {
+                                    Text("Download part $nextPartNumber")
+                                }
+                            } else if (project?.youtubeLink != null && !project.importComplete && Work.IMPORT !in state.jobs) {
                                 OutlinedButton(onClick = {
                                     StudioSession.resume(this@MainActivity)
                                     showNotificationPermission()
@@ -314,6 +365,17 @@ class MainActivity : ComponentActivity() {
                             Text("Open a video to start editing", style = MaterialTheme.typography.titleLarge)
                             Button(onClick = { tab = StudioTab.Import }) { Text("Import video") }
                         } else {
+                            if (project.guidedImport) {
+                                val sourceParts = project.parts.filterNot { it.part.joined }
+                                val partNumber = sourceParts.indexOf(selected) + 1
+                                if (partNumber > 0) {
+                                    Text("Part $partNumber · ${timestamp(selected.part.offsetMs)}–${timestamp(selected.part.nextOffsetMs)}",
+                                        style = MaterialTheme.typography.titleMedium)
+                                }
+                                if (guidedPending) OutlinedButton(
+                                    enabled = canDownloadPart, onClick = { nextPartDialog = true }
+                                ) { Text("Download part $nextPartNumber") }
+                            }
                             if (project.parts.size > 1) {
                                 var expanded by rememberSaveable { mutableStateOf(false) }
                                 TextButton(onClick = { expanded = !expanded }) {

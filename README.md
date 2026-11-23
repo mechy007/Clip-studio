@@ -10,6 +10,8 @@ Clip Studio is an Android-only editor for turning recorded videos into short cli
 4. In Captions, choose the streamer’s audio track for offline transcription or enter custom text for the selected trim. Choose a style, position, and size. Preview the result before exporting or save an SRT file for an external editor.
 5. Export one MP4 or queue up to ten. Choose 720p, 1080p, or 1440p, with optional muting. Files go to `Movies/Clip Studio` and can be shared from the app.
 
+For long uploads and finished livestream replays, choose **30-minute parts** in Import. Each download stops after one part. Clip and export from the part, then choose **Download next part** when ready. The last part may be shorter. Completed parts and the next starting point are saved with the project. Open the finished replay once YouTube makes it available after a livestream.
+
 Compatible YouTube recordings yield independently playable sections as the source arrives. Sections can be analyzed, trimmed, and exported while the download continues. A recording without a compatible progressive format can use the full-file importer. Adjacent ready sections can be joined for clips that cross a boundary. YouTube availability varies by recording.
 
 Grant notification permission to see import, analysis, and export progress outside the app. Saved projects, completed sections, highlight suggestions, and finished clip links can be reopened after a restart. Compatible progressive YouTube transfers can resume from a saved section boundary. Queued clips and their selected caption styles are restored with the project. Unqueued caption edits are kept during the current app session. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
