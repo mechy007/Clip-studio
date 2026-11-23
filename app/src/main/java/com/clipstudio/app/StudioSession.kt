@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,9 +31,13 @@ internal data class StudioState(
     val joined: SourcePart? = null,
     val joinRevision: Long = 0,
     val storageWarning: String? = null,
-    val playback: Pair<ExportClip, Uri>? = null
+    val playback: Pair<ExportClip, Uri>? = null,
+    val queueExportActive: Boolean = false,
+    val exportingClip: ExportClip? = null,
+    val tracking: List<TrackingMemo> = emptyList()
 ) {
     val queue: List<ExportClip> get() = project?.queue.orEmpty()
+    val exportStats: Map<Uri, RenderStats> get() = project?.renderStats.orEmpty()
 }
 
 internal data class ExportClip(
@@ -40,7 +45,8 @@ internal data class ExportClip(
     val layout: Layout, val camera: Crop, val gameplay: Crop,
     val width: Int, val muted: Boolean, val captions: List<CaptionCue> = emptyList(),
     val preset: CaptionPreset = CaptionPreset.KARAOKE,
-    val audio: AudioFinish = AudioFinish(), val facePath: List<FacePoint> = emptyList()
+    val audio: AudioFinish = AudioFinish(), val facePath: List<FacePoint> = emptyList(),
+    val fastExport: Boolean = false, val originalFraming: Boolean = false
 )
 
 internal object StudioSession {
@@ -51,6 +57,9 @@ internal object StudioSession {
     private val saves = Channel<StudioLibrary>(Channel.CONFLATED)
     private var initialized = false
     private var autoAnalyze = true
+    private var resumeAnalysis = false
+    private val captionMemos = mutableListOf<CaptionMemo>()
+    private val activeCaptions = mutableMapOf<Uri, CaptionMemo>()
 
     fun initialize(context: Context) {
         if (initialized) return
@@ -168,16 +177,22 @@ internal object StudioSession {
         update { it.copy(playback = null) }
     }
 
-    fun analyze(context: Context) = work(context, Work.ANALYZE, "Finding highlights") { app ->
-        while (true) {
-            val current = state.value.project ?: break
-            val pending = current.parts.firstOrNull { it.highlights == null } ?: break
-            describe(Work.ANALYZE, "Finding highlights · section ${current.parts.indexOf(pending) + 1}")
-            val highlights = StudioAnalysis.highlights(app, pending.part, current.mode)
-            updateProject(current.id) { project ->
-                project.copy(parts = project.parts.map {
-                    if (it.part.uri == pending.part.uri) it.copy(highlights = highlights) else it
-                })
+    fun analyze(context: Context) {
+        if (Work.EXPORT in jobs) {
+            resumeAnalysis = true
+            return
+        }
+        work(context, Work.ANALYZE, "Finding highlights") { app ->
+            while (true) {
+                val current = state.value.project ?: break
+                val pending = current.parts.firstOrNull { it.highlights == null } ?: break
+                describe(Work.ANALYZE, "Finding highlights · section ${current.parts.indexOf(pending) + 1}")
+                val highlights = StudioAnalysis.highlights(app, pending.part, current.mode)
+                updateProject(current.id) { project ->
+                    project.copy(parts = project.parts.map {
+                        if (it.part.uri == pending.part.uri) it.copy(highlights = highlights) else it
+                    })
+                }
             }
         }
     }
@@ -185,27 +200,71 @@ internal object StudioSession {
     fun captions(
         context: Context, part: SourcePart, start: Long, end: Long, language: String?
     ) = work(context, Work.CAPTIONS, "Generating offline captions") { app ->
-        val transcript = StudioAnalysis.captions(app, part, start, end, language)
-        update { it.copy(transcripts = it.transcripts + (part.uri to transcript)) }
-        status(if (transcript.isEmpty()) "No speech found in this clip" else "Captions ready to edit")
+        val cached = captionMemos.lastOrNull { it.covers(part, start, end, language) }
+        val memo = cached ?: CaptionMemo(part, start, end, language,
+            StudioAnalysis.captions(app, part, start, end, language)).also(::rememberCaptions)
+        activeCaptions[part.uri] = memo
+        if (activeCaptions.size > 24) activeCaptions.keys.firstOrNull { it != part.uri }?.let(activeCaptions::remove)
+        update { it.copy(transcripts = (it.transcripts + (part.uri to memo.words)).filterKeys(activeCaptions::containsKey)) }
+        status(when {
+            memo.words.isEmpty() -> "No speech found in this clip"
+            cached != null -> "Reused captions for this range"
+            else -> "Captions ready to edit"
+        })
+    }
+
+    private fun rememberCaptions(memo: CaptionMemo) {
+        captionMemos.removeAll { it.covers(memo.part, memo.start, memo.end, memo.language) &&
+            it.start == memo.start && it.end == memo.end }
+        captionMemos += memo
+        if (captionMemos.size > 24) captionMemos.removeAt(0)
+    }
+
+    fun rememberTracking(memo: TrackingMemo) {
+        if (memo.path.isNotEmpty()) update { it.copy(tracking = (it.tracking + memo).takeLast(16)) }
+    }
+
+    fun exportFirst(context: Context, clip: ExportClip) {
+        val project = state.value.project ?: return
+        if (clip !in project.queue || clip == state.value.exportingClip) return
+        val active = state.value.exportingClip?.takeIf { it in project.queue }
+        save(project.copy(queue = listOfNotNull(active, clip) + project.queue.filter { it != active && it != clip }))
+        if (jobs[Work.EXPORT] == null) export(context, listOf(clip), fromQueue = true)
     }
 
     fun export(context: Context, clips: List<ExportClip>, fromQueue: Boolean = false) =
         work(context, Work.EXPORT, "Preparing export") { app ->
             val source = state.value.project ?: return@work
-            if (clips.any { clip -> source.parts.none { it.part == clip.part } }) return@work
-            for ((index, clip) in clips.withIndex()) {
-                describe(Work.EXPORT, "Rendering ${index + 1} of ${clips.size}")
-                StudioMedia.export(app, clip) { uri ->
+            if (clips.isEmpty() || clips.any { clip -> source.parts.none { it.part == clip.part } }) return@work
+            jobs[Work.ANALYZE]?.let { analysis ->
+                resumeAnalysis = true
+                describe(Work.ANALYZE, "Pausing analysis for export")
+                analysis.cancelAndJoin()
+            }
+            update { it.copy(queueExportActive = fromQueue) }
+            var count = 0
+            while (true) {
+                val clip = if (fromQueue) state.value.library.projects.firstOrNull { it.id == source.id }
+                    ?.queue?.firstOrNull() else clips.getOrNull(count)
+                if (clip == null) break
+                update { it.copy(exportingClip = clip) }
+                describe(Work.EXPORT, "Exporting clip ${count + 1}")
+                StudioMedia.export(app, clip, { phase ->
+                    scope.launch {
+                        if (state.value.exportingClip == clip) describe(Work.EXPORT, phase)
+                    }
+                }) { uri, stats ->
                     withContext(Dispatchers.Main.immediate) {
                         updateProject(source.id) { project ->
                             project.copy(exports = project.exports + uri,
-                                queue = if (fromQueue) project.queue - clip else project.queue)
+                                queue = if (fromQueue) project.queue - clip else project.queue,
+                                renderStats = (project.renderStats + (uri to stats)).toList().takeLast(24).toMap())
                         }
                     }
                 }
+                count++
             }
-            status(if (clips.size == 1) "Saved to Movies/Clip Studio" else "${clips.size} clips saved to Movies/Clip Studio")
+            if (count > 0) status(if (count == 1) "Saved to Movies/Clip Studio" else "$count clips saved to Movies/Clip Studio")
         }
 
     fun editTranscript(uri: Uri, index: Int, text: String) {
@@ -215,6 +274,10 @@ internal object StudioSession {
         val timing = if (words.size == row.words.size) row.words.zip(words) { word, value -> word.copy(word = value) }
         else emptyList()
         val updated = transcript.toMutableList().apply { set(index, row.copy(text = text, words = timing)) }
+        activeCaptions[uri]?.copy(words = updated)?.let {
+            activeCaptions[uri] = it
+            rememberCaptions(it)
+        }
         update { it.copy(transcripts = it.transcripts + (uri to updated)) }
     }
 
@@ -236,10 +299,15 @@ internal object StudioSession {
 
     fun cancel(key: Work) {
         jobs[key]?.cancel()
-        if (key == Work.ANALYZE && Work.IMPORT in jobs) autoAnalyze = false
+        if (key == Work.ANALYZE) {
+            resumeAnalysis = false
+            if (Work.IMPORT in jobs) autoAnalyze = false
+        }
     }
 
     fun cancelAll() {
+        autoAnalyze = false
+        resumeAnalysis = false
         jobs.values.toList().forEach { it.cancel() }
     }
 
@@ -309,7 +377,7 @@ internal object StudioSession {
         if (jobs[key] != null) return
         val app = context.applicationContext
         initialize(app)
-        if (jobs.isEmpty()) {
+        if (jobs.isEmpty() && state.value.jobs.isEmpty()) {
             try {
                 ContextCompat.startForegroundService(app, Intent(app, StudioWorkService::class.java))
             } catch (_: IllegalStateException) {
@@ -322,7 +390,7 @@ internal object StudioSession {
             try {
                 body(app)
             } catch (cancelled: CancellationException) {
-                status("Cancelled · completed work was kept")
+                if (key != Work.ANALYZE || !resumeAnalysis) status("Cancelled · completed work was kept")
                 throw cancelled
             } catch (error: Exception) {
                 status(error.localizedMessage ?: "$label failed.")
@@ -330,7 +398,15 @@ internal object StudioSession {
                 status("This phone could not load the required media component.")
             } finally {
                 jobs.remove(key)
-                update { it.copy(jobs = it.jobs - key) }
+                // Start the replacement foreground work before publishing an idle state.
+                if (key == Work.EXPORT && resumeAnalysis) {
+                    resumeAnalysis = false
+                    if (state.value.project?.parts?.any { it.highlights == null } == true) analyze(app)
+                }
+                update {
+                    if (key == Work.EXPORT) it.copy(jobs = it.jobs - key, exportingClip = null, queueExportActive = false)
+                    else it.copy(jobs = it.jobs - key)
+                }
             }
         }
         jobs[key] = job

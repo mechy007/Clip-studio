@@ -14,7 +14,8 @@ internal data class StudioProject(
     val name: String, val layout: Layout, val parts: List<PartReview>, val queue: List<ExportClip> = emptyList(),
     val id: String = UUID.randomUUID().toString(),
     val youtubeLink: String? = null, val importComplete: Boolean = false,
-    val mode: HighlightMode = HighlightMode.BALANCED, val exports: List<Uri> = emptyList()
+    val mode: HighlightMode = HighlightMode.BALANCED, val exports: List<Uri> = emptyList(),
+    val renderStats: Map<Uri, RenderStats> = emptyMap()
 )
 
 internal data class CreatorPreset(
@@ -81,11 +82,18 @@ internal class StudioProjectStore(context: Context) {
             }
         }.orEmpty()
         val exports = root.optJSONArray("exports") ?: JSONArray()
+        val timings = root.optJSONObject("renderStats") ?: JSONObject()
+        val renderStats = timings.keys().asSequence().mapNotNull { key ->
+            val item = timings.optJSONObject(key) ?: return@mapNotNull null
+            val encoder = item.optString("encoder").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            Uri.parse(key) to RenderStats(encoder, item.optLong("prepare"), item.optLong("render"),
+                item.optLong("save"), item.optBoolean("retry"))
+        }.toMap()
         return StudioProject(root.getString("name"), Layout.valueOf(root.getString("layout")), parts, queue,
             root.optString("id", UUID.randomUUID().toString()),
             root.optString("youtube", "").takeIf { it.isNotEmpty() },
             root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
-            (0 until exports.length()).map { Uri.parse(exports.getString(it)) })
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats)
     }
 
     fun save(library: StudioLibrary) {
@@ -120,9 +128,14 @@ internal class StudioProjectStore(context: Context) {
         }
         val queue = JSONArray()
         project.queue.forEach { queue.put(it.json()) }
+        val timings = JSONObject()
+        project.renderStats.forEach { (uri, stats) ->
+            timings.put(uri.toString(), JSONObject().put("encoder", stats.encoder).put("prepare", stats.preparationMs)
+                .put("render", stats.renderMs).put("save", stats.saveMs).put("retry", stats.retried))
+        }
         return JSONObject().put("name", project.name).put("layout", project.layout.name)
             .put("id", project.id).put("youtube", project.youtubeLink.orEmpty()).put("complete", project.importComplete)
-            .put("mode", project.mode.name).put("exports", JSONArray(project.exports.map(Uri::toString)))
+            .put("mode", project.mode.name).put("exports", JSONArray(project.exports.map(Uri::toString))).put("renderStats", timings)
             .put("parts", rows).put("queue", queue)
     }
 
@@ -153,7 +166,7 @@ internal class StudioProjectStore(context: Context) {
         return JSONObject().put("uri", part.uri.toString()).put("start", start).put("end", end)
             .put("layout", layout.name).put("camera", camera.json()).put("gameplay", gameplay.json())
             .put("width", width).put("muted", muted).put("preset", preset.name).put("captions", rows)
-            .put("audio", audio.json())
+            .put("audio", audio.json()).put("fast", fastExport).put("original", originalFraming)
             .put("tracking", JSONArray(facePath.map { JSONArray(listOf(it.timeMs, it.x.toDouble(), it.y.toDouble())) }))
     }
 
@@ -179,6 +192,6 @@ internal class StudioProjectStore(context: Context) {
         }
         return ExportClip(part, getLong("start"), getLong("end"), Layout.valueOf(getString("layout")),
             getJSONArray("camera").crop(), getJSONArray("gameplay").crop(), getInt("width"), getBoolean("muted"),
-            captions, CaptionPreset.valueOf(getString("preset")), audio(), path)
+            captions, CaptionPreset.valueOf(getString("preset")), audio(), path, optBoolean("fast"), optBoolean("original"))
     }
 }
