@@ -103,6 +103,18 @@ class ImportedWorkflowTest {
         assertEquals(listOf(short), recordingSampleRanges(short))
     }
 
+    @Test fun qualityCapsEveryFallbackFormatAndAllowsMultipleCopiesOfTheSamePart() {
+        val start = 30 * 60_000L
+        val medium = RecordingDownload(start, DownloadQuality.MEDIUM)
+        val full = RecordingDownload(start, DownloadQuality.FULL_HD)
+        assertEquals(listOf(medium, full), listOf(medium, full, medium).distinct())
+        DownloadQuality.entries.forEach { quality ->
+            val alternatives = recordingFormatSelector(quality.maxHeight).split('/')
+            assertEquals(4, alternatives.size)
+            assertTrue(alternatives.all { "[height<=${quality.maxHeight}]" in it })
+        }
+    }
+
     @Test fun aCheckpointKeepsTheSelectedEndWhenAReplayGrows() {
         val selected = 75 * 60_000L
         val expanded = 90 * 60_000L

@@ -13,6 +13,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,6 +70,7 @@ internal object StudioSession {
     private var initialized = false
     private var autoAnalyze = true
     private var resumeAnalysis = false
+    private var guidedProgressRevision = 0L
     private val captionMemos = mutableListOf<CaptionMemo>()
 
     fun initialize(context: Context) {
@@ -163,11 +166,34 @@ internal object StudioSession {
         })
     }
 
-    fun downloadScannedPart(context: Context, startMs: Long) = work(context, Work.IMPORT, "Preparing selected part") { app ->
-        val project = state.value.project ?: return@work
-        val selected = project.scannedParts?.firstOrNull { it.range.startMs == startMs } ?: return@work
-        if (project.availableParts.any { !it.part.joined && it.part.offsetMs == startMs }) return@work
-        importGuidedPart(app, selected)
+    fun queueScannedPart(startMs: Long, quality: DownloadQuality) {
+        val project = state.value.project ?: return
+        if (Work.IMPORT in jobs || project.scannedParts.orEmpty().none { it.range.startMs == startMs }) return
+        val item = RecordingDownload(startMs, quality)
+        if (item in project.downloadQueue || project.availableParts.any { it.part.matches(item) }) return
+        save(project.copy(downloadQueue = project.downloadQueue + item))
+    }
+
+    fun removeScannedDownload(item: RecordingDownload) {
+        val project = state.value.project ?: return
+        if (Work.IMPORT !in jobs) save(project.copy(downloadQueue = project.downloadQueue - item))
+    }
+
+    fun downloadScannedQueue(context: Context) = work(context, Work.IMPORT, "Preparing download queue") { app ->
+        var openedEditor = false
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val project = state.value.project ?: break
+            val item = project.downloadQueue.firstOrNull() ?: break
+            val selected = project.scannedParts?.firstOrNull { it.range.startMs == item.startMs }
+            if (selected == null || project.availableParts.any { it.part.matches(item) }) {
+                save(project.copy(downloadQueue = project.downloadQueue - item))
+                continue
+            }
+            importGuidedPart(app, selected, item, openEditor = !openedEditor)
+            openedEditor = true
+        }
+        if (openedEditor) status("Download queue complete")
     }
 
     fun resume(context: Context, useFullDownload: Boolean = false, useFastParts: Boolean = false) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
@@ -182,27 +208,32 @@ internal object StudioSession {
         }
     }
 
-    private suspend fun importGuidedPart(app: Context, selected: RecordingScanPart? = null) {
+    private suspend fun importGuidedPart(
+        app: Context, selected: RecordingScanPart? = null, download: RecordingDownload? = null, openEditor: Boolean = true
+    ) {
         val project = state.value.project ?: return
         val link = project.youtubeLink ?: return
         val previous = project.latestSourcePart
         val partNumber = if (selected != null) project.scannedParts.orEmpty().indexOf(selected) + 1
             else project.parts.count { !it.part.joined } + 1
-        describe(Work.IMPORT, "Preparing part $partNumber")
+        val partLabel = download?.let { "part $partNumber · ${it.quality.label}" } ?: "part $partNumber"
+        val revision = ++guidedProgressRevision
+        update { it.copy(guidedDownload = null) }
+        describe(Work.IMPORT, "Preparing $partLabel")
         val activeImport = jobs[Work.IMPORT]
         var downloaded = false
         val start = selected?.range?.startMs ?: previous?.nextOffsetMs ?: project.guidedStartMs
         val publish: suspend (SourcePart, Boolean) -> Unit = { part, last ->
             withContext(Dispatchers.Main.immediate) {
-                addPart(app, part)
+                addPart(app, part, download)
                 val allDone = if (selected == null) last else state.value.project?.let { owner ->
                     val offsets = owner.parts.filterNot { it.part.joined }.map { it.part.offsetMs }.toSet()
                     owner.scannedParts.orEmpty().all { it.range.startMs in offsets }
                 } == true
                 if (allDone) state.value.project?.let { save(it.copy(importComplete = true)) }
-                update { it.copy(guidedPart = part) }
+                if (openEditor) update { it.copy(guidedPart = part) }
                 status(when {
-                    selected != null -> "Part $partNumber ready to clip"
+                    selected != null -> "${partLabel.replaceFirstChar { it.uppercaseChar() }} ready to clip"
                     last -> "Final part ready to clip"
                     project.guidedFromFull -> "Part $partNumber ready. Next part uses the saved recording."
                     else -> "Part $partNumber ready. Download paused."
@@ -213,7 +244,7 @@ internal object StudioSession {
         if (project.guidedFromFull) {
             fun report(label: String, percent: Int) {
                 scope.launch {
-                    if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
+                    if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true || revision != guidedProgressRevision) return@launch
                     update { it.copy(guidedDownload = GuidedDownloadProgress(percent, null),
                         jobs = it.jobs + (Work.IMPORT to "$label · $percent%")) }
                 }
@@ -224,17 +255,17 @@ internal object StudioSession {
                 publish = publish)
         } else {
             StudioMedia.downloadRecordingPart(app, project.id, link, start,
-                if (selected == null) previous?.formatId else null, fast = project.fastGuidedParts, requestedEndMs = selected?.range?.endMs, progress = { progress ->
+                if (selected == null) previous?.formatId else null, fast = project.fastGuidedParts, requestedEndMs = selected?.range?.endMs, quality = download?.quality, progress = { progress ->
                     scope.launch {
-                        if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
+                        if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true || revision != guidedProgressRevision) return@launch
                         val current = state.value.guidedDownload
                         if (!progress.newAttempt && (current?.assembling == true || progress.percent < (current?.percent ?: 0))) return@launch
-                        val label = if (progress.newAttempt) "Trying resumable download for part $partNumber"
-                        else if (progress.assembling) "Assembling part $partNumber" else if (progress.percent == 0 && progress.bytesFetched != null) {
-                            if (progress.bytesFetched == 0L) "Connecting for part $partNumber"
-                            else "Downloading part $partNumber · ${android.text.format.Formatter.formatFileSize(app, progress.bytesFetched)} received"
-                        } else if (progress.percent == 0) "Preparing download for part $partNumber" else buildString {
-                            append("Downloading part $partNumber · ${progress.percent}%")
+                        val label = if (progress.newAttempt) "Trying resumable download for $partLabel"
+                        else if (progress.assembling) "Assembling $partLabel" else if (progress.percent == 0 && progress.bytesFetched != null) {
+                            if (progress.bytesFetched == 0L) "Connecting for $partLabel"
+                            else "Downloading $partLabel · ${android.text.format.Formatter.formatFileSize(app, progress.bytesFetched)} received"
+                        } else if (progress.percent == 0) "Preparing download for $partLabel" else buildString {
+                            append("Downloading $partLabel · ${progress.percent}%")
                             progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
                         }
                         update { it.copy(guidedDownload = progress, jobs = it.jobs + (Work.IMPORT to label)) }
@@ -282,9 +313,15 @@ internal object StudioSession {
     fun join(context: Context, first: SourcePart, second: SourcePart) = work(context, Work.JOIN, "Joining sections") { app ->
         val project = state.value.project ?: return@work
         if (project.availableParts.none { it.part == first } || project.availableParts.none { it.part == second }) return@work
-        val part = project.availableParts.map { it.part }.firstOrNull {
+        val sources = project.availableParts.map { it.part }
+        val alternateCopyExists = sources.any {
+            !it.joined && (it.offsetMs == first.offsetMs && it != first || it.offsetMs == second.offsetMs && it != second)
+        }
+        val cached = if (alternateCopyExists || first.downloadQuality != null || second.downloadQuality != null) null
+        else sources.firstOrNull {
             it.joined && it.offsetMs == first.offsetMs && it.nextOffsetMs == second.nextOffsetMs
-        } ?: StudioMedia.join(app, listOf(first, second)).also { joined ->
+        }
+        val part = cached ?: StudioMedia.join(app, listOf(first, second)).also { joined ->
             updateProject(project.id) { it.copy(parts = it.parts + PartReview(joined, emptyList())) }
         }
         if (state.value.project?.id == project.id) {
@@ -532,13 +569,13 @@ internal object StudioSession {
         jobs.values.toList().forEach { it.cancel() }
     }
 
-    private fun addPart(app: Context, part: SourcePart) {
+    private fun addPart(app: Context, part: SourcePart, download: RecordingDownload? = null) {
         val project = state.value.project ?: return
-        val previous = project.parts.indexOfFirst { it.released && !it.part.joined && it.part.offsetMs == part.offsetMs }
+        val previous = project.parts.indexOfFirst { it.released && !it.part.joined && it.part.offsetMs == part.offsetMs && it.part.downloadQuality == part.downloadQuality }
         val parts = if (project.scannedParts != null && previous >= 0 && !part.joined) {
             project.parts.toMutableList().apply { this[previous] = PartReview(part) }
         } else project.parts + PartReview(part)
-        save(project.copy(parts = parts))
+        save(project.copy(parts = parts, downloadQueue = if (download == null) project.downloadQueue else project.downloadQueue - download))
         if (autoAnalyze) analyze(app)
     }
 

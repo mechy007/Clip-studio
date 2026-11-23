@@ -57,6 +57,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -394,6 +395,35 @@ class MainActivity : ComponentActivity() {
                                             showNotificationPermission()
                                         }) { Text("Continue audio scan") }
                                     }
+                                    var qualityHeight by rememberSaveable { mutableIntStateOf(720) }
+                                    val quality = DownloadQuality.fromHeight(qualityHeight) ?: DownloadQuality.HIGH
+                                    Text("Download quality", style = MaterialTheme.typography.titleSmall)
+                                    DownloadQuality.entries.chunked(2).forEach { row ->
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            row.forEach { option ->
+                                                FilterChip(selected = quality == option, enabled = !occupied,
+                                                    onClick = { qualityHeight = option.maxHeight },
+                                                    label = { Text(option.label) })
+                                            }
+                                        }
+                                    }
+                                    Text("Download resolution can be lower when the source lacks the selected quality.",
+                                        style = MaterialTheme.typography.bodySmall)
+                                    if (project.downloadQueue.isNotEmpty()) {
+                                        Text("Download queue", style = MaterialTheme.typography.titleMedium)
+                                        project.downloadQueue.forEach { item ->
+                                            val number = scannedParts.indexOfFirst { it.range.startMs == item.startMs } + 1
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("Part $number · ${item.quality.label}", Modifier.weight(1f))
+                                                TextButton(enabled = !occupied,
+                                                    onClick = { StudioSession.removeScannedDownload(item) }) { Text("Remove") }
+                                            }
+                                        }
+                                        Button(enabled = !occupied, onClick = {
+                                            StudioSession.downloadScannedQueue(this@MainActivity)
+                                            showNotificationPermission()
+                                        }) { Text("Download queue · ${project.downloadQueue.size}") }
+                                    }
                                     var sortByAudio by rememberSaveable { mutableStateOf(true) }
                                     FilterChip(selected = sortByAudio, onClick = { sortByAudio = !sortByAudio },
                                         label = { Text(if (sortByAudio) "Audio activity order" else "Timestamp order") })
@@ -401,7 +431,9 @@ class MainActivity : ComponentActivity() {
                                         else scannedParts.withIndex().toList()
                                     ranked.forEach { (index, result) ->
                                         val range = result.range
-                                        val saved = project.parts.firstOrNull { !it.part.joined && it.part.offsetMs == range.startMs }
+                                        val item = RecordingDownload(range.startMs, quality)
+                                        val saved = project.parts.firstOrNull { it.part.matches(item) }
+                                        val queued = item in project.downloadQueue
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Column(Modifier.weight(1f)) {
                                                 Text("Part ${index + 1} · ${timestamp(range.startMs)}–${timestamp(range.endMs)}")
@@ -409,10 +441,10 @@ class MainActivity : ComponentActivity() {
                                                     ?: "Audio ranking unavailable", style = MaterialTheme.typography.bodySmall)
                                             }
                                             when {
+                                                queued -> Text("Queued", style = MaterialTheme.typography.labelSmall)
                                                 saved == null || saved.released -> OutlinedButton(enabled = !occupied, onClick = {
-                                                    StudioSession.downloadScannedPart(this@MainActivity, range.startMs)
-                                                    showNotificationPermission()
-                                                }) { Text(if (saved?.released == true) "Download again" else "Download") }
+                                                    StudioSession.queueScannedPart(range.startMs, quality)
+                                                }) { Text(if (saved?.released == true) "Queue again" else "Add to queue") }
                                                 else -> TextButton(onClick = {
                                                     selectedPart = saved.part.uri.toString()
                                                     chosenMoment = -1L
@@ -511,7 +543,8 @@ class MainActivity : ComponentActivity() {
                                     ?: sourceParts.indexOf(selected)) + 1
                                 if (project.scannedParts != null) OutlinedButton(onClick = { tab = StudioTab.Import }) { Text("Choose parts") }
                                 if (partNumber > 0) {
-                                    Text("Part $partNumber · ${timestamp(selected.part.offsetMs)}–${timestamp(selected.part.nextOffsetMs)}",
+                                    val cap = selected.part.downloadQuality?.let { " · ${it.label} max" }.orEmpty()
+                                    Text("Part $partNumber · ${timestamp(selected.part.offsetMs)}–${timestamp(selected.part.nextOffsetMs)}$cap",
                                         style = MaterialTheme.typography.titleMedium)
                                 }
                                 val queuedCount = project.queue.count { it.part == selected.part }
@@ -541,7 +574,8 @@ class MainActivity : ComponentActivity() {
                                             selectedPart = part.uri.toString()
                                         },
                                         enabled = !exporting, label = {
-                                            Text("${timestamp(part.offsetMs)} – ${timestamp(part.offsetMs + part.durationMs)}")
+                                            val time = "${timestamp(part.offsetMs)} – ${timestamp(part.offsetMs + part.durationMs)}"
+                                            Text(part.downloadQuality?.let { "$time · ${it.label} max" } ?: time)
                                         }
                                     )
                                 }
@@ -623,7 +657,8 @@ class MainActivity : ComponentActivity() {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Column(Modifier.weight(1f)) {
                                                 val number = (project.scannedParts?.indexOfFirst { it.range.startMs == part.offsetMs } ?: index) + 1
-                                                Text("Part $number · ${timestamp(part.offsetMs)}–${timestamp(part.nextOffsetMs)}")
+                                                val time = "${timestamp(part.offsetMs)}–${timestamp(part.nextOffsetMs)}"
+                                                Text("Part $number · $time" + (part.downloadQuality?.let { " · ${it.label} max" }.orEmpty()))
                                                 val storage = if (review.released) "Footage removed" else
                                                     sizes[part.uri]?.let { Formatter.formatFileSize(this@MainActivity, it) }
                                                 storage?.let { Text(it, style = MaterialTheme.typography.labelSmall) }

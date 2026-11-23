@@ -26,7 +26,8 @@ internal data class StudioProject(
     val bookmarks: Map<Uri, List<Long>> = emptyMap(),
     val guidedFromFull: Boolean = false,
     val fastGuidedParts: Boolean = false,
-    val scannedParts: List<RecordingScanPart>? = null
+    val scannedParts: List<RecordingScanPart>? = null,
+    val downloadQueue: List<RecordingDownload> = emptyList()
 ) {
     val availableParts: List<PartReview> get() = parts.filterNot { it.released }
 
@@ -98,7 +99,8 @@ internal class StudioProjectStore(context: Context) {
             val offset = row.getLong("offset")
             val duration = row.getLong("duration")
             val part = SourcePart(uri, offset, duration, row.optLong("next", offset + duration),
-                row.optString("format", "").takeIf { it.isNotEmpty() }, row.optBoolean("joined"))
+                row.optString("format", "").takeIf { it.isNotEmpty() }, row.optBoolean("joined"),
+                DownloadQuality.fromHeight(row.optInt("downloadHeight")))
             val highlights = row.optJSONArray("highlights")?.let { items ->
                 (0 until items.length()).map { position ->
                     val item = items.getJSONObject(position)
@@ -173,11 +175,20 @@ internal class StudioProjectStore(context: Context) {
                     row.optInt("samples"), measurements)
             }
         }
+        val queuedDownloads = root.optJSONArray("downloadQueue")?.let { rows ->
+            val starts = scanned.orEmpty().map { it.range.startMs }.toSet()
+            (0 until rows.length()).mapNotNull { index ->
+                val row = rows.optJSONObject(index) ?: return@mapNotNull null
+                val start = row.optLong("start", -1)
+                val quality = DownloadQuality.fromHeight(row.optInt("height")) ?: return@mapNotNull null
+                if (start in starts) RecordingDownload(start, quality) else null
+            }.distinct()
+        }.orEmpty()
         return StudioProject(root.getString("name"), Layout.valueOf(root.getString("layout")), parts, queue,
             root.optString("id", UUID.randomUUID().toString()),
             root.optString("youtube", "").takeIf { it.isNotEmpty() },
             root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
-            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, guided, root.optLong("guidedStartMs"), drafts, exportedParts, framing, bookmarks, root.optBoolean("guidedFromFull"), root.optBoolean("fastGuidedParts"), scanned)
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, guided, root.optLong("guidedStartMs"), drafts, exportedParts, framing, bookmarks, root.optBoolean("guidedFromFull"), root.optBoolean("fastGuidedParts"), scanned, queuedDownloads)
     }
 
     fun save(library: StudioLibrary) {
@@ -202,6 +213,7 @@ internal class StudioProjectStore(context: Context) {
             val row = JSONObject().put("uri", part.uri.toString()).put("offset", part.offsetMs)
                 .put("duration", part.durationMs).put("next", part.nextOffsetMs)
                 .put("format", part.formatId.orEmpty()).put("joined", part.joined).put("released", review.released)
+                .put("downloadHeight", part.downloadQuality?.maxHeight)
             review.highlights?.let { highlights ->
                 val items = JSONArray()
                 highlights.forEach { items.put(JSONObject().put("start", it.startMs).put("end", it.endMs)
@@ -224,6 +236,9 @@ internal class StudioProjectStore(context: Context) {
             .put("exportedParts", JSONArray(project.exportedParts.map(Uri::toString)))
             .put("guidedStartMs", project.guidedStartMs).put("guidedFromFull", project.guidedFromFull)
             .put("fastGuidedParts", project.fastGuidedParts)
+            .put("downloadQueue", JSONArray(project.downloadQueue.map { download ->
+                JSONObject().put("start", download.startMs).put("height", download.quality.maxHeight)
+            }))
             .put("scannedParts", project.scannedParts?.let { parts -> JSONArray(parts.map { item ->
                 JSONObject().put("start", item.range.startMs).put("end", item.range.endMs)
                     .put("score", item.score ?: -1).put("samples", item.samples)

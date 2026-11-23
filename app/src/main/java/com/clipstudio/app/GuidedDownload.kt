@@ -5,6 +5,23 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
 
+internal enum class DownloadQuality(val maxHeight: Int, val videoKbps: Int) {
+    LOW(360, 900), MEDIUM(480, 1_400), HIGH(720, 2_600), FULL_HD(1080, 4_500);
+
+    val label: String get() = "${maxHeight}p"
+
+    companion object {
+        fun fromHeight(height: Int): DownloadQuality? = entries.firstOrNull { it.maxHeight == height }
+    }
+}
+
+internal data class RecordingDownload(val startMs: Long, val quality: DownloadQuality)
+
+internal fun recordingFormatSelector(height: Int): String =
+    "bv[protocol=https][vcodec^=avc1][height<=$height]+ba[protocol=https][acodec^=mp4a]/" +
+        "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=$height]/" +
+        "bv[protocol=https][height<=$height]+ba[protocol=https]/b[protocol=https][height<=$height]"
+
 internal const val DOWNLOAD_CHUNK_MS = 120_000L
 
 internal fun RecordingPartWindow.downloadChunks(): List<RecordingPartWindow> =
