@@ -6,6 +6,7 @@ import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,6 +17,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RangeSlider
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,6 +65,7 @@ internal fun ClipEditor(
     var gameplay by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(GameplayDefault) }
     var width by rememberSaveable { mutableStateOf(1080) }
     var mute by rememberSaveable { mutableStateOf(false) }
+    var fineFraming by rememberSaveable { mutableStateOf(false) }
     var preset by rememberSaveable { mutableStateOf(CaptionPreset.KARAOKE) }
     var captionEnabled by rememberSaveable { mutableStateOf(true) }
     var editCaptions by rememberSaveable { mutableStateOf(false) }
@@ -84,8 +87,8 @@ internal fun ClipEditor(
     }
     val busy = Work.EXPORT in state.jobs
     val transcript = state.transcripts[part.uri].orEmpty()
-    val activeCues = remember(transcript, start, end, captionEnabled) {
-        if (captionEnabled && end > start) CaptionTrack.fromTranscript(transcript, start, end, 36) else emptyList()
+    val activeCues = remember(transcript, start, end) {
+        if (end > start) CaptionTrack.fromTranscript(transcript, start, end, 36) else emptyList()
     }
     LaunchedEffect(part.uri, frameAt) {
         frame = try {
@@ -137,7 +140,14 @@ internal fun ClipEditor(
     }
     if (layout == Layout.Split && faceStatus.isNotBlank()) Text(faceStatus)
     if (layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
-        TextButton(onClick = { camera = CameraDefault; gameplay = GameplayDefault }) { Text("Reset framing") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { fineFraming = !fineFraming }) { Text(if (fineFraming) "Hide controls" else "Fine controls") }
+            TextButton(onClick = { camera = CameraDefault; gameplay = GameplayDefault }) { Text("Reset framing") }
+        }
+        if (fineFraming) {
+            if (layout == Layout.Split) FramingSliders("Facecam", camera) { camera = it }
+            FramingSliders("Gameplay", gameplay) { gameplay = it }
+        }
     }
     Text("Trim · ${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}")
     RangeSlider(
@@ -209,7 +219,9 @@ internal fun ClipEditor(
             FilterChip(selected = mute, onClick = { mute = !mute }, label = { Text("Mute") })
         }
     }
-    fun clip() = ExportClip(part, start, end, layout, camera, gameplay, width, mute, activeCues, preset)
+    fun clip() = ExportClip(
+        part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(), preset
+    )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(enabled = canExport, onClick = {
             StudioSession.export(context, listOf(clip()))
@@ -218,5 +230,18 @@ internal fun ClipEditor(
         OutlinedButton(enabled = canExport && state.queue.size < 10, onClick = { StudioSession.queue(clip()) }) {
             Text("Add to queue")
         }
+    }
+}
+
+@Composable
+private fun FramingSliders(title: String, crop: Crop, onChange: (Crop) -> Unit) {
+    Column {
+        Text(title, style = MaterialTheme.typography.titleSmall)
+        Text("Horizontal position", style = MaterialTheme.typography.bodySmall)
+        Slider(crop.x, { onChange(crop.copy(x = it)) })
+        Text("Vertical position", style = MaterialTheme.typography.bodySmall)
+        Slider(crop.y, { onChange(crop.copy(y = it)) })
+        Text("Zoom", style = MaterialTheme.typography.bodySmall)
+        Slider(crop.zoom, { onChange(crop.copy(zoom = it)) }, valueRange = 1f..4f)
     }
 }
