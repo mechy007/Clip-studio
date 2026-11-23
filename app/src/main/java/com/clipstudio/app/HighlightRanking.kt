@@ -17,6 +17,9 @@ internal fun rankHighlights(
 ): List<Highlight> {
     if (durationMs < 2_000L) return emptyList()
     val clipDuration = targetMs.coerceIn(2_000, durationMs)
+    val focus = if (reactions.isEmpty() && mode in listOf(HighlightMode.FUNNY, HighlightMode.TALKING)) {
+        HighlightMode.BALANCED
+    } else mode
     val reference = AudioSignalScorer.reference(energy)
     val typical = energy.map { it.rms }.sorted().let { it.getOrNull(it.size / 2) } ?: 0f
     val motionSamples = visual.map { it.change }.sorted()
@@ -39,7 +42,7 @@ internal fun rankHighlights(
         val difference = visualBySecond[second]?.change ?: 0f
         val motion = ((difference - maxOf(0.035f, typicalMotion * 1.12f)) * 4).coerceIn(0f, 1f)
         val speech = (-2L..2L).map { reactionBySecond[second + it]?.speech ?: 0f }.average().toFloat()
-        val main = when (mode) {
+        val main = when (focus) {
             HighlightMode.BALANCED -> maxOf(reactionStrength, loudness * .85f, motion * .9f)
             HighlightMode.FUNNY -> laughter * .85f + shout * .1f + cheer * .05f
             HighlightMode.GAMEPLAY -> motion * .85f + loudness * .15f
@@ -49,9 +52,9 @@ internal fun rankHighlights(
         val score = ((main * .72f + (reactionStrength + loudness + motion) * .093f) * 100)
             .toInt().coerceIn(0, 100)
         val reason = when {
-            mode == HighlightMode.TALKING -> "Sustained speech"
-            mode == HighlightMode.GAMEPLAY -> "Sudden visual activity"
-            mode == HighlightMode.FUNNY -> if (laughter >= shout) "Laughter detected" else "Shouting detected"
+            focus == HighlightMode.TALKING -> "Sustained speech"
+            focus == HighlightMode.GAMEPLAY -> "Sudden visual activity"
+            focus == HighlightMode.FUNNY -> if (laughter >= shout) "Laughter detected" else "Shouting detected"
             reactionStrength >= .24f && reactionStrength == main -> when (reactionStrength) {
                 laughter -> "Laughter detected"
                 shout -> "Shouting detected"
@@ -60,7 +63,7 @@ internal fun rankHighlights(
             motion * .9f >= loudness * .85f -> "Sudden visual activity"
             else -> "Audio spike"
         }
-        val lead = when (mode) {
+        val lead = when (focus) {
             HighlightMode.GAMEPLAY -> clipDuration * 2 / 5
             HighlightMode.TALKING -> clipDuration / 2
             else -> clipDuration / 3
@@ -69,14 +72,14 @@ internal fun rankHighlights(
         val end = start + clipDuration
         fun active(at: Long): Boolean {
             val signal = reactionBySecond[at]
-            val reaction = signal?.let { maxOf(it.laughter, it.shouting, it.cheering) } ?: 0f
+            val eventStrength = signal?.let { maxOf(it.laughter, it.shouting, it.cheering) } ?: 0f
             val speaking = (signal?.speech ?: 0f) >= .30f
             val moving = (visualBySecond[at]?.change ?: 0f) >= maxOf(.20f, typicalMotion * 1.25f)
-            return when (mode) {
-                HighlightMode.FUNNY -> reaction >= .24f
+            return when (focus) {
+                HighlightMode.FUNNY -> eventStrength >= .24f
                 HighlightMode.GAMEPLAY -> moving
                 HighlightMode.TALKING -> speaking
-                HighlightMode.BALANCED -> reaction >= .28f || speaking || moving
+                HighlightMode.BALANCED -> eventStrength >= .28f || speaking || moving
             }
         }
         val setup = if (active(start / 1000) && active(start / 1000 - 1)) {

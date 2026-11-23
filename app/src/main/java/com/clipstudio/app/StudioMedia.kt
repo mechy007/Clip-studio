@@ -15,6 +15,8 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.CancellationException
@@ -83,12 +85,12 @@ internal object StudioMedia {
         val dir = File(context.filesDir, "imports/parts-${UUID.randomUUID()}")
         check(dir.mkdirs()) { "Could not create download storage." }
         val list = File(dir, "segments.csv")
-        var count = 0
+        val published = mutableSetOf<String>()
         var latestEnd = resumeAtMs
         suspend fun publishReady(includeTail: Boolean = false) {
             val csv = if (list.isFile) list.readText() else ""
             val rows = csv.substringBeforeLast('\n', "").lineSequence().mapNotNull(::parseSegmentRow).toList()
-            for ((index, entry) in rows.withIndex().drop(count)) {
+            for ((index, entry) in rows.withIndex().drop(published.size)) {
                 val tail = index == rows.lastIndex
                 if (tail && !includeTail && entry.endMs - entry.startMs < 36_000L) break
                 val file = File(dir, entry.name)
@@ -96,18 +98,29 @@ internal object StudioMedia {
                 val uri = Uri.fromFile(file)
                 if (entry.startMs + resumeAtMs < latestEnd - 750) break
                 val offset = entry.startMs + resumeAtMs
-                latestEnd = entry.endMs + resumeAtMs
-                onPart(SourcePart(uri, offset, duration(context, uri), latestEnd, selectedFormat))
-                count++
+                val end = entry.endMs + resumeAtMs
+                val part = SourcePart(uri, offset, duration(context, uri), end, selectedFormat)
+                currentCoroutineContext().ensureActive()
+                withContext(NonCancellable) {
+                    onPart(part)
+                    latestEnd = end
+                    published += entry.name
+                }
             }
         }
         try {
             val complete = coroutineScope {
                 val transfer = async {
                     val seek = if (resumeAtMs == 0L) emptyList() else listOf("-ss", seconds(resumeAtMs))
-                    val arguments = listOf("-nostdin", "-loglevel", "error", "-rw_timeout", "20000000") + seek + listOf(
-                        "-i", source, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
-                        "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
+                    // Stream-copy the initial import. A restarted import needs an accurate seek
+                    // that decodes and discards preceding GOP frames before producing new parts.
+                    val codec = if (resumeAtMs == 0L) listOf("-c", "copy") else listOf(
+                        "-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k",
+                        "-force_key_frames", "expr:gte(t,n_forced*40)", "-c:a", "aac", "-b:a", "128k"
+                    )
+                    val arguments = listOf("-nostdin", "-loglevel", "error", "-rw_timeout", "20000000") + seek +
+                        listOf("-i", source, "-map", "0:v:0", "-map", "0:a:0") + codec + listOf(
+                        "-avoid_negative_ts", "disabled", "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
                         "-segment_format_options", "movflags=+faststart",
                         "-segment_list", list.absolutePath, "-segment_list_type", "csv",
                         File(dir, "part-%05d.mp4").absolutePath
@@ -122,14 +135,15 @@ internal object StudioMedia {
                 val last = if (list.isFile) list.readLines().lastOrNull()?.let(::parseSegmentRow) else null
                 val finished = success && (expectedEnd == 0L || last != null && resumeAtMs + last.endMs >= expectedEnd - 1800)
                 if (finished) publishReady(includeTail = true)
-                finished
+                finished && last != null && latestEnd >= resumeAtMs + last.endMs
             }
-            check(complete || count == 0 && resumeAtMs == 0L) {
+            check(complete || published.isEmpty() && resumeAtMs == 0L) {
                 "Download interrupted. Use Resume download to keep the completed sections."
             }
-            complete && count > 0
+            complete && published.isNotEmpty()
         } finally {
-            if (count == 0) dir.deleteRecursively()
+            if (published.isEmpty()) dir.deleteRecursively()
+            else dir.listFiles().orEmpty().filter { it.name !in published }.forEach { it.delete() }
         }
     }
 
@@ -139,35 +153,40 @@ internal object StudioMedia {
         val next = sections.last()
         require(adjacent(first, next)) { "These sections have a gap." }
         val dir = File(context.filesDir, "imports").apply { mkdirs() }
-        val list = File.createTempFile("studio-join-", ".ffconcat", context.cacheDir)
         val result = File.createTempFile("studio-joined-", ".mp4", dir)
         var complete = false
         try {
-            list.writeText(buildString {
-                appendLine("ffconcat version 1.0")
-                sections.forEach { part ->
-                    val path = requireNotNull(part.uri.path).replace("'", "'\\''")
-                    appendLine("file '$path'")
-                    appendLine("duration ${seconds(part.nextOffsetMs - part.offsetMs)}")
-                }
-            })
-            check(runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
-                "-i", list.absolutePath, "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart",
+            // Decode each file separately so initial copied parts and accurately
+            // resumed parts can be joined even when their encoder settings differ.
+            val a = seconds(first.nextOffsetMs - first.offsetMs)
+            val b = seconds(next.nextOffsetMs - next.offsetMs)
+            val filter = "[0:v:0]trim=duration=$a,setpts=PTS-STARTPTS,setsar=1,fps=30[v0];" +
+                "[1:v:0]trim=duration=$b,setpts=PTS-STARTPTS,setsar=1,fps=30[v1];" +
+                "[0:a:0]aresample=48000,apad,atrim=duration=$a,asetpts=PTS-STARTPTS[a0];" +
+                "[1:a:0]aresample=48000,apad,atrim=duration=$b,asetpts=PTS-STARTPTS[a1];" +
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"
+            check(runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-y",
+                "-i", input(context, first.uri), "-i", input(context, next.uri),
+                "-filter_complex_threads", "2", "-filter_complex", filter, "-map", "[v]", "-map", "[a]",
+                "-threads", "2", "-c:v", "libopenh264", "-b:v", "6500k", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
                 result.absolutePath)) && YouTubeDownloadValidation.isValidMp4(result)) { "Could not join these sections." }
             val part = SourcePart(Uri.fromFile(result), first.offsetMs, duration(context, Uri.fromFile(result)),
                 next.nextOffsetMs, first.formatId, joined = true)
             complete = true
             part
         } finally {
-            list.delete()
             if (!complete) result.delete()
         }
     }
 
-    suspend fun export(context: Context, clip: ExportClip): Uri = withContext(Dispatchers.IO) {
-        val output = render(context, clip, preview = false)
-        try { saveToGallery(context, output) } finally { output.delete() }
-    }
+    suspend fun export(context: Context, clip: ExportClip, record: suspend (Uri) -> Unit) =
+        withContext(Dispatchers.IO) {
+            val output = render(context, clip, preview = false)
+            try {
+                currentCoroutineContext().ensureActive()
+                withContext(NonCancellable) { record(saveToGallery(context, output)) }
+            } finally { output.delete() }
+        }
 
     suspend fun preview(context: Context, clip: ExportClip): Uri =
         Uri.fromFile(render(context, clip, preview = true))
@@ -222,8 +241,8 @@ internal object StudioMedia {
                 extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
             }
         } catch (_: Exception) {
-            // Preserve the standard optional audio mapping when the container is only supported by FFmpeg.
-            1
+            // The renderer retains optional audio mapping for unknown containers.
+            -1
         } finally { extractor.release() }
     }
 
@@ -235,7 +254,7 @@ internal object StudioMedia {
                 "measure_perchannel=none:measure_overall=Peak_level," +
                 "ametadata=print:key=lavfi.astats.Overall.Peak_level:file=${data.absolutePath}"
             val success = runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-i", input(context, part.uri),
-                "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-af", "aresample=16000,asetpts=N/SR/TB,$filter", "-f", "null", "-"))
+                "-map", "0:a:0", "-vn", "-ar", "16000", "-af", "aformat=channel_layouts=mono,aresample=16000,asetpts=N/SR/TB,$filter", "-f", "null", "-"))
             if (!success) emptyList() else data.useLines { lines ->
                 lines.filter { it.startsWith("lavfi.astats.Overall.Peak_level=") }.take(160).map { row ->
                     val db = row.substringAfter('=').toFloatOrNull() ?: -60f
@@ -252,7 +271,7 @@ internal object StudioMedia {
         runFfmpeg(arrayOf(
             "-nostdin", "-loglevel", "error", "-y", "-ss", seconds(startMs),
             "-i", input(context, part.uri), "-t", seconds(endMs - startMs), "-map", "0:a:0",
-            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_f32be", "-f", "f32be", file.absolutePath
+            "-vn", "-ar", "16000", "-af", "aformat=channel_layouts=mono", "-c:a", "pcm_f32be", "-f", "f32be", file.absolutePath
         ))
 
     private fun saveToGallery(context: Context, file: File): Uri {

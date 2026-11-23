@@ -6,6 +6,7 @@ import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileNotFoundException
 import java.util.UUID
 
 internal data class PartReview(val part: SourcePart, val highlights: List<Highlight>? = null)
@@ -28,25 +29,28 @@ internal data class StudioLibrary(
 
 
 internal class StudioProjectStore(context: Context) {
-    private val file = AtomicFile(File(context.filesDir, "last-project.json"))
+    private val base = File(context.filesDir, "last-project.json")
+    private val file = AtomicFile(base)
 
-    fun load(): StudioLibrary = runCatching {
-        val root = JSONObject(String(file.readFully(), Charsets.UTF_8))
+    fun load(): StudioLibrary {
+        val bytes = try {
+            file.readFully()
+        } catch (missing: FileNotFoundException) {
+            if (base.exists() || File(base.path + ".bak").exists()) throw missing
+            return StudioLibrary()
+        }
+        val root = JSONObject(String(bytes, Charsets.UTF_8))
         val saved = root.optJSONArray("projects")
-        if (saved == null) {
+        return if (saved == null) {
             val legacy = readProject(root)
             StudioLibrary(listOf(legacy), legacy.id)
         } else {
-            val projects = (0 until saved.length()).mapNotNull { index ->
-                runCatching { readProject(saved.getJSONObject(index)) }.getOrNull()
-            }
+            val projects = (0 until saved.length()).map { index -> readProject(saved.getJSONObject(index)) }
             val presets = root.optJSONArray("presets") ?: JSONArray()
             StudioLibrary(projects, root.optString("current", "").takeIf { it.isNotEmpty() },
-                (0 until presets.length()).mapNotNull { index ->
-                    runCatching { presets.getJSONObject(index).creatorPreset() }.getOrNull()
-                })
+                (0 until presets.length()).map { index -> presets.getJSONObject(index).creatorPreset() })
         }
-    }.getOrDefault(StudioLibrary())
+    }
 
     private fun readProject(root: JSONObject): StudioProject {
         val rows = root.getJSONArray("parts")

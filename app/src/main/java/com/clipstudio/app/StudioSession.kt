@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -27,6 +28,8 @@ internal data class StudioState(
     val transcripts: Map<Uri, List<TranscriptSegment>> = emptyMap(),
     val library: StudioLibrary = StudioLibrary(),
     val joined: SourcePart? = null,
+    val joinRevision: Long = 0,
+    val storageWarning: String? = null,
     val playback: Pair<ExportClip, Uri>? = null
 ) {
     val queue: List<ExportClip> get() = project?.queue.orEmpty()
@@ -55,7 +58,17 @@ internal object StudioSession {
         val app = context.applicationContext
         scope.launch {
             val store = StudioProjectStore(app)
-            val recovered = withContext(Dispatchers.IO) { store.load() }
+            val recovered = try {
+                withContext(Dispatchers.IO) {
+                    try { store.load() }
+                    catch (_: Exception) { delay(250); store.load() }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                update { it.copy(storageWarning = "Saved projects could not be opened. Existing files were kept. Reopen Clip Studio to retry.") }
+                return@launch
+            }
             val ongoing = state.value
             if (ongoing.project == null) {
                 val project = recovered.projects.firstOrNull { it.id == recovered.currentId } ?: recovered.projects.firstOrNull()
@@ -132,14 +145,16 @@ internal object StudioSession {
 
     fun join(context: Context, first: SourcePart, second: SourcePart) = work(context, Work.JOIN, "Joining sections") { app ->
         val project = state.value.project ?: return@work
+        if (project.parts.none { it.part == first } || project.parts.none { it.part == second }) return@work
         val part = project.parts.map { it.part }.firstOrNull {
             it.joined && it.offsetMs == first.offsetMs && it.nextOffsetMs == second.nextOffsetMs
-        } ?: StudioMedia.join(app, listOf(first, second)).also {
-            val latest = state.value.project ?: return@work
-            save(latest.copy(parts = latest.parts + PartReview(it, emptyList())))
+        } ?: StudioMedia.join(app, listOf(first, second)).also { joined ->
+            updateProject(project.id) { it.copy(parts = it.parts + PartReview(joined, emptyList())) }
         }
-        update { it.copy(joined = part) }
-        status("Joined sections are ready to trim")
+        if (state.value.project?.id == project.id) {
+            update { it.copy(joined = part, joinRevision = it.joinRevision + 1) }
+            status("Joined sections are ready to trim")
+        }
     }
 
     fun preview(context: Context, clip: ExportClip) = work(context, Work.PREVIEW, "Rendering playback preview") { app ->
@@ -159,10 +174,11 @@ internal object StudioSession {
             val pending = current.parts.firstOrNull { it.highlights == null } ?: break
             describe(Work.ANALYZE, "Finding highlights · section ${current.parts.indexOf(pending) + 1}")
             val highlights = StudioAnalysis.highlights(app, pending.part, current.mode)
-            val refreshed = state.value.project ?: break
-            save(refreshed.copy(parts = refreshed.parts.map {
-                if (it.part.uri == pending.part.uri) it.copy(highlights = highlights) else it
-            }))
+            updateProject(current.id) { project ->
+                project.copy(parts = project.parts.map {
+                    if (it.part.uri == pending.part.uri) it.copy(highlights = highlights) else it
+                })
+            }
         }
     }
 
@@ -176,14 +192,18 @@ internal object StudioSession {
 
     fun export(context: Context, clips: List<ExportClip>, fromQueue: Boolean = false) =
         work(context, Work.EXPORT, "Preparing export") { app ->
-            update { it.copy(exports = emptyList()) }
+            val source = state.value.project ?: return@work
+            if (clips.any { clip -> source.parts.none { it.part == clip.part } }) return@work
             for ((index, clip) in clips.withIndex()) {
                 describe(Work.EXPORT, "Rendering ${index + 1} of ${clips.size}")
-                val uri = StudioMedia.export(app, clip)
-                update { it.copy(exports = it.exports + uri) }
-                val project = state.value.project
-                if (project != null) save(project.copy(exports = project.exports + uri,
-                    queue = if (fromQueue) project.queue - clip else project.queue))
+                StudioMedia.export(app, clip) { uri ->
+                    withContext(Dispatchers.Main.immediate) {
+                        updateProject(source.id) { project ->
+                            project.copy(exports = project.exports + uri,
+                                queue = if (fromQueue) project.queue - clip else project.queue)
+                        }
+                    }
+                }
             }
             status(if (clips.size == 1) "Saved to Movies/Clip Studio" else "${clips.size} clips saved to Movies/Clip Studio")
         }
@@ -259,9 +279,17 @@ internal object StudioSession {
 
     private fun save(project: StudioProject) {
         val library = state.value.library
-        update { it.copy(project = project) }
+        update { it.copy(project = project, exports = project.exports) }
         persist(library.copy(projects = listOf(project) + library.projects.filterNot { it.id == project.id },
             currentId = project.id))
+    }
+
+    private fun updateProject(id: String, change: (StudioProject) -> StudioProject) {
+        val current = state.value
+        val existing = current.library.projects.firstOrNull { it.id == id } ?: return
+        val updated = change(existing)
+        if (current.project?.id == id) save(updated)
+        else persist(current.library.copy(projects = current.library.projects.map { if (it.id == id) updated else it }))
     }
 
     private fun persist(library: StudioLibrary) {

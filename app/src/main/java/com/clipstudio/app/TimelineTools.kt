@@ -13,7 +13,7 @@ internal fun adjacent(first: SourcePart, second: SourcePart): Boolean =
         second.offsetMs > first.offsetMs && abs(first.nextOffsetMs - second.offsetMs) <= 750
 
 internal fun audioFinishFilter(audio: AudioFinish, tracks: Int, durationMs: Long): String? {
-    if (tracks == 0 || durationMs <= 0L) return null
+    if (tracks <= 0 || durationMs <= 0L) return null
     val mix = audio.mixTracks && tracks >= 2
     val effects = buildList {
         if (audio.normalize) add("loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000")

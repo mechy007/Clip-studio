@@ -108,7 +108,7 @@ internal fun ClipEditor(
         appliedSelection = momentSelection
     }
     val busy = Work.EXPORT in state.jobs
-    var facePath by remember(start, end, camera, layout, lockCamera) { mutableStateOf(emptyList<FacePoint>()) }
+    var facePath by remember(start, end, camera, layout) { mutableStateOf(emptyList<FacePoint>()) }
     LaunchedEffect(part.uri) {
         audioTracks = withContext(Dispatchers.IO) { StudioMedia.audioTrackCount(context, part.uri) }
         waveform = try {

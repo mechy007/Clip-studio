@@ -105,7 +105,7 @@ class MainActivity : ComponentActivity() {
         }
         val occupied = state.jobs.isNotEmpty()
         var projectsOpen by rememberSaveable { mutableStateOf(false) }
-        LaunchedEffect(state.joined?.uri) {
+        LaunchedEffect(state.joinRevision) {
             state.joined?.let {
                 selectedPart = it.uri.toString()
                 chosenMoment = -1L
@@ -169,6 +169,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                state.storageWarning?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (state.status.isNotBlank()) Text(state.status, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (project?.youtubeLink != null && !project.importComplete && Work.IMPORT !in state.jobs) {
                     OutlinedButton(onClick = {

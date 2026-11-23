@@ -22,6 +22,7 @@ class TimelineFeatureTest {
         assertTrue(mix.contains("afade=t=out:st=3.600:d=0.400"))
         assertFalse(requireNotNull(audioFinishFilter(options, 1, 4_000)).contains("amix"))
         assertNull(audioFinishFilter(options, 0, 4_000))
+        assertNull(audioFinishFilter(options, -1, 4_000))
     }
 
     @Test fun highlightsUseTheSelectedFocus() {
@@ -35,4 +36,13 @@ class TimelineFeatureTest {
         assertEquals("Sudden visual activity", gaming.single().reason)
         assertEquals("Sustained speech", talking.single().reason)
     }
+    @Test fun eventInferenceFailureStillUsesAudioEnergy() {
+        val energy = (0..50).map { index ->
+            val level = if (index == 20) .8f else .03f
+            AudioEnergyWindow(index * 1000L, (index + 1) * 1000L, level, level)
+        }
+        val fallback = rankHighlights(51_000, energy, emptyList(), emptyList(), mode = HighlightMode.TALKING)
+        assertEquals("Audio spike", fallback.single().reason)
+    }
+
 }
