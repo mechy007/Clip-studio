@@ -38,6 +38,27 @@ class ImportedWorkflowTest {
         assertFalse(pop.contains("before"))
     }
 
+    @Test fun animatesCaptionsWhenWordTimestampsAreMissing() {
+        val transcript = listOf(TranscriptSegment(12_000, 13_200, "one two three"))
+        val cues = CaptionTrack.fromTranscript(transcript, 11_500, 14_000)
+        val frames = AssKaraokeTrack.frames(cues)
+        assertEquals(listOf(0, 1, 2), frames.map { it.activeIndex })
+        assertEquals(listOf(500L, 900L, 1300L), frames.map { it.startMs })
+        assertEquals(1700L, frames.last().endMs)
+        val karaoke = AssKaraokeTrack.render(cues, CaptionPreset.KARAOKE, 1080, 1920)
+        assertTrue(karaoke.contains("0:00:00.50,0:00:00.90"))
+        assertTrue(karaoke.contains("\\c&H1FD2FF&"))
+        val pop = AssKaraokeTrack.render(cues, CaptionPreset.POP, 1080, 1920)
+        assertTrue(pop.contains("\\t(0,120"))
+    }
+
+    @Test fun retainsTextWhenTheCueIsTooShortToAnimateEachWord() {
+        val cue = CaptionCue(300L, 360L, "one two three")
+        val frame = AssKaraokeTrack.frames(listOf(cue)).single()
+        assertEquals(-1, frame.activeIndex)
+        assertEquals(listOf(cue.text), frame.words)
+    }
+
     @Test fun rendersEqual720PanelsAndMapsPreviewCropWithinBounds() {
         val filter = videoFilter(Layout.Split, Crop(0f, 1f, 3f), Crop(1f, 0f), resolution = 720)
         assertEquals(2, Regex("scale=720:640").findAll(filter).count())

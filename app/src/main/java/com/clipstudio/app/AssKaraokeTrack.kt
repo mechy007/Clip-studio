@@ -9,13 +9,13 @@ internal data class CaptionFrame(
     val activeIndex: Int = -1
 )
 
-/** One caption timeline shared by the Android preview and ASS export. */
+/** Caption timeline shared by the rendered Android preview and MP4 export. */
 object AssKaraokeTrack {
     internal const val POP_DURATION_MS = 120L
 
     internal fun frames(cues: List<CaptionCue>): List<CaptionFrame> = buildList {
         for (cue in cues) {
-            val words = cue.words.sortedBy { it.startMs }
+            val words = (cue.words.ifEmpty { estimateWordTiming(cue) }).sortedBy { it.startMs }
             if (words.isEmpty()) {
                 add(CaptionFrame(cue.startMs, cue.endMs, listOf(cue.text)))
                 continue
@@ -46,6 +46,16 @@ object AssKaraokeTrack {
         }
     }.sortedBy { it.startMs }
 
+    private fun estimateWordTiming(cue: CaptionCue): List<TimedWord> {
+        val words = cue.text.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val duration = cue.endMs - cue.startMs
+        if (words.isEmpty() || duration < words.size * 35L) return emptyList()
+        return words.mapIndexed { index, word ->
+            TimedWord(cue.startMs + duration * index / words.size,
+                cue.startMs + duration * (index + 1) / words.size, word)
+        }
+    }
+
     fun render(cues: List<CaptionCue>, preset: CaptionPreset, width: Int, height: Int): String = buildString {
         val size = (minOf(width, height) * 0.055).toInt().coerceAtLeast(12)
         val outline = (size / if (preset == CaptionPreset.CLEAN) 18 else 12).coerceAtLeast(1)
@@ -62,7 +72,7 @@ object AssKaraokeTrack {
         appendLine()
         appendLine("[V4+ Styles]")
         appendLine("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
-        appendLine("Style: Default,sans-serif,$size,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,$bold,0,0,0,100,100,0,0,$border,$outline,1,2,$horizontal,$horizontal,$margin,1")
+        appendLine("Style: Default,Roboto,$size,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,$bold,0,0,0,100,100,0,0,$border,$outline,1,2,$horizontal,$horizontal,$margin,1")
         appendLine()
         appendLine("[Events]")
         appendLine("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
