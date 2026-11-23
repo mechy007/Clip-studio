@@ -25,7 +25,8 @@ internal data class StudioProject(
     val framing: ProjectFraming? = null,
     val bookmarks: Map<Uri, List<Long>> = emptyMap(),
     val guidedFromFull: Boolean = false,
-    val fastGuidedParts: Boolean = false
+    val fastGuidedParts: Boolean = false,
+    val scannedParts: List<RecordingScanPart>? = null
 ) {
     val availableParts: List<PartReview> get() = parts.filterNot { it.released }
 
@@ -149,11 +150,21 @@ internal class StudioProjectStore(context: Context) {
                     .filter { it in 0 until part.durationMs }.distinct().sorted()
             }.toMap()
         }.orEmpty()
+        val scanned = root.optJSONArray("scannedParts")?.let { rows ->
+            (0 until rows.length()).mapNotNull { index ->
+                val row = rows.optJSONObject(index) ?: return@mapNotNull null
+                val start = row.optLong("start", -1)
+                val end = row.optLong("end", -1)
+                if (start < 0 || end <= start || end - start > RECORDING_PART_MS) return@mapNotNull null
+                RecordingScanPart(RecordingPartWindow(start, end), row.optInt("score", -1).takeIf { it in 0..100 },
+                    row.optInt("samples"))
+            }
+        }
         return StudioProject(root.getString("name"), Layout.valueOf(root.getString("layout")), parts, queue,
             root.optString("id", UUID.randomUUID().toString()),
             root.optString("youtube", "").takeIf { it.isNotEmpty() },
             root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
-            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, guided, root.optLong("guidedStartMs"), drafts, exportedParts, framing, bookmarks, root.optBoolean("guidedFromFull"), root.optBoolean("fastGuidedParts"))
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, guided, root.optLong("guidedStartMs"), drafts, exportedParts, framing, bookmarks, root.optBoolean("guidedFromFull"), root.optBoolean("fastGuidedParts"), scanned)
     }
 
     fun save(library: StudioLibrary) {
@@ -200,6 +211,10 @@ internal class StudioProjectStore(context: Context) {
             .put("exportedParts", JSONArray(project.exportedParts.map(Uri::toString)))
             .put("guidedStartMs", project.guidedStartMs).put("guidedFromFull", project.guidedFromFull)
             .put("fastGuidedParts", project.fastGuidedParts)
+            .put("scannedParts", project.scannedParts?.let { parts -> JSONArray(parts.map { item ->
+                JSONObject().put("start", item.range.startMs).put("end", item.range.endMs)
+                    .put("score", item.score ?: -1).put("samples", item.samples)
+            }) })
             .put("drafts", JSONArray(project.drafts.map { (id, draft) -> draft.json().put("id", id) }))
             .put("framing", project.framing?.let {
                 JSONObject().put("layout", it.layout.name).put("camera", it.camera.json()).put("gameplay", it.gameplay.json())

@@ -109,6 +109,7 @@ class MainActivity : ComponentActivity() {
         val pages = rememberSaveableStateHolder()
         var link by rememberSaveable { mutableStateOf("") }
         var guidedImport by rememberSaveable { mutableStateOf(false) }
+        var analyzeFirst by rememberSaveable { mutableStateOf(false) }
         var fastParts by rememberSaveable { mutableStateOf(false) }
         var downloadFullFirst by rememberSaveable { mutableStateOf(false) }
         var recordingStart by rememberSaveable { mutableStateOf("") }
@@ -154,7 +155,7 @@ class MainActivity : ComponentActivity() {
         }
         val exporting = Work.EXPORT in state.jobs
         val latestGuidedPart = project?.takeIf { it.guidedImport }?.latestSourcePart
-        val guidedPending = project?.guidedImport == true && !project.importComplete
+        val guidedPending = project?.guidedImport == true && project.scannedParts == null && !project.importComplete
         val nextPartNumber = (project?.parts?.count { !it.part.joined } ?: 0) + 1
         val canDownloadPart = guidedPending && !exporting && Work.IMPORT !in state.jobs &&
             Work.JOIN !in state.jobs && Work.CAPTIONS !in state.jobs && Work.PREVIEW !in state.jobs
@@ -319,14 +320,16 @@ class MainActivity : ComponentActivity() {
                                     FilterChip(selected = guidedImport, enabled = !occupied,
                                         onClick = { guidedImport = !guidedImport }, label = { Text("30-minute parts") })
                                     if (guidedImport) {
-                                        if (!downloadFullFirst) {
+                                        FilterChip(selected = analyzeFirst, enabled = !occupied,
+                                            onClick = { analyzeFirst = !analyzeFirst }, label = { Text("Analyze first") })
+                                        if (!analyzeFirst && !downloadFullFirst) {
                                             FilterChip(selected = fastParts, enabled = !occupied,
                                                 onClick = { fastParts = !fastParts }, label = { Text("Fast part download") })
                                         }
-                                        FilterChip(selected = downloadFullFirst, enabled = !occupied,
+                                        if (!analyzeFirst) FilterChip(selected = downloadFullFirst, enabled = !occupied,
                                             onClick = { downloadFullFirst = !downloadFullFirst },
                                             label = { Text("Download full video first") })
-                                        if (downloadFullFirst) Text("Downloads the whole recording once, then prepares each part on this phone.",
+                                        if (!analyzeFirst && downloadFullFirst) Text("Downloads the whole recording once, then prepares each part on this phone.",
                                             style = MaterialTheme.typography.bodySmall)
                                         OutlinedTextField(
                                             value = recordingStart, onValueChange = { recordingStart = it.take(16) },
@@ -343,11 +346,16 @@ class MainActivity : ComponentActivity() {
                                         onClick = {
                                             selectedPart = null
                                             chosenMoment = -1L
-                                            StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout, guidedImport,
-                                                if (guidedImport) startMs ?: 0L else 0L, fromFull = downloadFullFirst, fastParts = fastParts)
+                                            if (guidedImport && analyzeFirst) {
+                                                StudioSession.analyzeYouTubeParts(this@MainActivity, link.trim(), incomingLayout, startMs ?: 0L)
+                                            } else {
+                                                StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout, guidedImport,
+                                                    if (guidedImport) startMs ?: 0L else 0L, fromFull = downloadFullFirst, fastParts = fastParts)
+                                            }
                                             showNotificationPermission()
                                         }
                                     ) { Text(when {
+                                        guidedImport && analyzeFirst -> "Analyze parts"
                                         guidedImport && downloadFullFirst -> "Download full video for parts"
                                         guidedImport -> "Download part 1"
                                         else -> "Import & find highlights"
@@ -364,6 +372,43 @@ class MainActivity : ComponentActivity() {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(label, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary)
                                         if (work != Work.STORAGE) TextButton(onClick = { StudioSession.cancel(work) }) { Text("Cancel") }
+                                    }
+                                }
+                            }
+                            val scannedParts = project?.scannedParts
+                            if (project != null && scannedParts != null) {
+                                if (scannedParts.isEmpty() && !occupied) {
+                                    OutlinedButton(onClick = {
+                                        StudioSession.retryPartAnalysis(this@MainActivity)
+                                        showNotificationPermission()
+                                    }) { Text("Retry analysis") }
+                                } else if (scannedParts.isNotEmpty()) {
+                                    Text("Analyzed parts", style = MaterialTheme.typography.titleMedium)
+                                    Text("Parts are ranked using short audio samples. Quiet highlights may be missed.",
+                                        style = MaterialTheme.typography.bodySmall)
+                                    val ranked = scannedParts.withIndex().sortedByDescending { it.value.score ?: -1 }
+                                    ranked.forEach { (index, result) ->
+                                        val range = result.range
+                                        val saved = project.parts.firstOrNull { !it.part.joined && it.part.offsetMs == range.startMs }
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Column(Modifier.weight(1f)) {
+                                                Text("Part ${index + 1} · ${timestamp(range.startMs)}–${timestamp(range.endMs)}")
+                                                Text(result.score?.let { "Audio activity $it/100 · ${result.samples} samples" }
+                                                    ?: "Audio ranking unavailable", style = MaterialTheme.typography.bodySmall)
+                                            }
+                                            when {
+                                                saved == null -> OutlinedButton(enabled = !occupied, onClick = {
+                                                    StudioSession.downloadScannedPart(this@MainActivity, range.startMs)
+                                                    showNotificationPermission()
+                                                }) { Text("Download") }
+                                                saved.released -> Text("Footage removed", style = MaterialTheme.typography.labelSmall)
+                                                else -> TextButton(onClick = {
+                                                    selectedPart = saved.part.uri.toString()
+                                                    chosenMoment = -1L
+                                                    tab = StudioTab.Editor
+                                                }) { Text("Open editor") }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -385,7 +430,7 @@ class MainActivity : ComponentActivity() {
                                     Text("If a part stalls, this downloads the full recording once and prepares the remaining parts locally.",
                                         style = MaterialTheme.typography.bodySmall)
                                 }
-                            } else if (project?.youtubeLink != null && !project.importComplete && Work.IMPORT !in state.jobs) {
+                            } else if (project?.youtubeLink != null && project.scannedParts == null && !project.importComplete && Work.IMPORT !in state.jobs) {
                                 OutlinedButton(onClick = {
                                     StudioSession.resume(this@MainActivity)
                                     showNotificationPermission()
@@ -442,6 +487,7 @@ class MainActivity : ComponentActivity() {
                                 if (guidedPending) Button(enabled = canDownloadPart, onClick = ::downloadNextPart) {
                                     Text("Download part $nextPartNumber")
                                 }
+                                if (project.scannedParts != null) OutlinedButton(onClick = { tab = StudioTab.Import }) { Text("Choose parts") }
                                 OutlinedButton(onClick = { tab = StudioTab.Projects }) { Text("Open exports") }
                             } else {
                                 Text("Open a video to start editing", style = MaterialTheme.typography.titleLarge)
@@ -450,7 +496,9 @@ class MainActivity : ComponentActivity() {
                         } else {
                             if (project.guidedImport) {
                                 val sourceParts = project.parts.filterNot { it.part.joined }
-                                val partNumber = sourceParts.indexOf(selected) + 1
+                                val partNumber = (project.scannedParts?.indexOfFirst { it.range.startMs == selected.part.offsetMs }
+                                    ?: sourceParts.indexOf(selected)) + 1
+                                if (project.scannedParts != null) OutlinedButton(onClick = { tab = StudioTab.Import }) { Text("Choose parts") }
                                 if (partNumber > 0) {
                                     Text("Part $partNumber · ${timestamp(selected.part.offsetMs)}–${timestamp(selected.part.nextOffsetMs)}",
                                         style = MaterialTheme.typography.titleMedium)
@@ -563,7 +611,8 @@ class MainActivity : ComponentActivity() {
                                         val part = review.part
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Column(Modifier.weight(1f)) {
-                                                Text("Part ${index + 1} · ${timestamp(part.offsetMs)}–${timestamp(part.nextOffsetMs)}")
+                                                val number = (project.scannedParts?.indexOfFirst { it.range.startMs == part.offsetMs } ?: index) + 1
+                                                Text("Part $number · ${timestamp(part.offsetMs)}–${timestamp(part.nextOffsetMs)}")
                                                 val storage = if (review.released) "Footage removed" else
                                                     sizes[part.uri]?.let { Formatter.formatFileSize(this@MainActivity, it) }
                                                 storage?.let { Text(it, style = MaterialTheme.typography.labelSmall) }

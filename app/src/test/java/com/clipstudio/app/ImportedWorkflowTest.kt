@@ -88,6 +88,34 @@ class ImportedWorkflowTest {
         assertEquals(null, nextRecordingPart(tail.endMs, duration))
     }
 
+    @Test fun recordingScanKeepsTheChosenStartAndShortFinalPart() {
+        val start = 10 * 60_000L
+        val parts = recordingScanRanges(start, 75 * 60_000L)
+        assertEquals(listOf(
+            RecordingPartWindow(start, 40 * 60_000L),
+            RecordingPartWindow(40 * 60_000L, 70 * 60_000L),
+            RecordingPartWindow(70 * 60_000L, 75 * 60_000L)
+        ), parts)
+        val samples = recordingSampleRanges(parts.first())
+        assertEquals(3, samples.size)
+        assertTrue(samples.all { it.startMs >= start && it.endMs <= parts.first().endMs && it.lengthMs == 5_000L })
+        val short = RecordingPartWindow(start, start + 1_000)
+        assertEquals(listOf(short), recordingSampleRanges(short))
+    }
+
+    @Test fun recordingScanRanksMeasuredActivityAndKeepsUnsampledPartsSelectable() {
+        val parts = recordingScanRanges(0, 75 * 60_000L)
+        val scores = scoreRecordingScan(parts, listOf(
+            listOf(AudioEnergyWindow(10_000, 15_000, .04f, .09f)),
+            listOf(AudioEnergyWindow(1_810_000, 1_815_000, .50f, .90f)),
+            emptyList()
+        ))
+        assertEquals(parts, scores.map { it.range })
+        assertTrue(requireNotNull(scores[1].score) > requireNotNull(scores[0].score))
+        assertEquals(listOf(1, 1, 0), scores.map { it.samples })
+        assertEquals(null, scores[2].score)
+    }
+
     @Test fun exactlyThirtyMinutesNeedsOnlyOnePart() {
         val part = requireNotNull(nextRecordingPart(0, RECORDING_PART_MS))
         assertEquals(RECORDING_PART_MS, part.lengthMs)
