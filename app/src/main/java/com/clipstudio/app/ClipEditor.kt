@@ -110,10 +110,14 @@ internal fun ClipEditor(
     var savingPreset by rememberSaveable { mutableStateOf(false) }
     var showingPresets by rememberSaveable { mutableStateOf(false) }
     var waveform by remember { mutableStateOf<List<Float>?>(null) }
-    var audioTracks by remember { mutableStateOf(0) }
+    var audioTracks by remember { mutableStateOf<Int?>(null) }
     var fineFraming by rememberSaveable { mutableStateOf(false) }
     var preset by rememberSaveable { mutableStateOf(CaptionPreset.KARAOKE) }
     var captionPosition by rememberSaveable { mutableStateOf(CaptionPosition.LOWER) }
+    var captionSize by rememberSaveable { mutableStateOf(100) }
+    var customCaptions by rememberSaveable { mutableStateOf(false) }
+    var customText by rememberSaveable { mutableStateOf("") }
+    var streamerTrack by rememberSaveable { mutableStateOf(0) }
     var captionEnabled by rememberSaveable { mutableStateOf(true) }
     var editCaptions by rememberSaveable { mutableStateOf(false) }
     var languageIndex by rememberSaveable { mutableStateOf(0) }
@@ -161,18 +165,26 @@ internal fun ClipEditor(
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { emptyList() }
     }
-    val transcript = state.transcripts[part.uri].orEmpty()
-    val activeCues = remember(transcript, start, end) {
-        if (end > start) CaptionTrack.fromTranscript(transcript, start, end, 36) else emptyList()
+    val trackCount = audioTracks ?: 0
+    val language = Languages[languageIndex].second
+    val transcript = state.transcripts[part.uri]?.takeIf {
+        it.audioTrack == streamerTrack && it.language == language
+    }?.words.orEmpty()
+    val activeCues = remember(transcript, start, end, customCaptions, customText) {
+        when {
+            customCaptions -> CaptionTrack.custom(customText, end - start)
+            end > start -> CaptionTrack.fromTranscript(transcript, start, end, 36)
+            else -> emptyList()
+        }
     }
-    fun audioOptions() = AudioFinish(normalize, fades, mix && audioTracks >= 2, voiceLevel, gameLevel)
+    fun audioOptions() = AudioFinish(normalize, fades, mix && trackCount >= 2, voiceLevel, gameLevel)
     fun clip() = ExportClip(
         part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(),
         preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail, enhanceFacecam = layout == Layout.Split && enhanceFacecam,
-        captionPosition = captionPosition
+        captionPosition = captionPosition, captionSize = captionSize
     )
     val generatingCaptions = Work.CAPTIONS in state.jobs
-    val waitingForCaptions = captionEnabled && generatingCaptions
+    val waitingForCaptions = captionEnabled && !customCaptions && generatingCaptions
     val canRenderEdit = !busy && !waitingForCaptions && end - start >= 500L
     val canPreviewEdit = canRenderEdit && Work.PREVIEW !in state.jobs
     fun previewEdit() {
@@ -354,6 +366,7 @@ internal fun ClipEditor(
                             width = saved.width
                             preset = saved.captions
                             captionPosition = saved.captionPosition
+                            captionSize = saved.captionSize
                             mute = saved.muted
                             normalize = saved.audio.normalize
                             fades = saved.audio.fade
@@ -370,7 +383,7 @@ internal fun ClipEditor(
                     confirmButton = {
                         TextButton(enabled = presetName.isNotBlank(), onClick = {
                             StudioSession.savePreset(CreatorPreset(presetName.trim(), layout, camera, gameplay,
-                                width, preset, mute, audioOptions(), captionPosition))
+                                width, preset, mute, audioOptions(), captionPosition, captionSize))
                             savingPreset = false
                             presetName = ""
                         }) { Text("Save") }
@@ -461,29 +474,61 @@ internal fun ClipEditor(
             EditorTool.Captions -> {
                 Text("Captions", style = MaterialTheme.typography.titleLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(enabled = canCaption, onClick = {
-                        StudioSession.captions(context, part, start, end, Languages[languageIndex].second)
-                        notify()
-                    }) { Text("Generate captions") }
-                    TextButton(enabled = Work.CAPTIONS !in state.jobs,
-                        onClick = { languageIndex = (languageIndex + 1) % Languages.size }) { Text(Languages[languageIndex].first) }
+                    FilterChip(selected = !customCaptions, onClick = { customCaptions = false }, label = { Text("Streamer audio") })
+                    FilterChip(selected = customCaptions, onClick = { customCaptions = true }, label = { Text("Custom text") })
                 }
-                if (end - start > StudioAnalysis.MAX_CAPTION_DURATION_MS) Text("Choose up to 2 minutes for automatic captions.")
-                if (generatingCaptions) {
+                if (customCaptions) {
+                    OutlinedTextField(
+                        value = customText, onValueChange = { customText = it.take(140) },
+                        label = { Text("Caption text") }, supportingText = { Text("Applies to the selected trim") },
+                        modifier = Modifier.fillMaxWidth(), minLines = 2, maxLines = 4
+                    )
+                } else {
+                    Text("Choose the audio track that contains the streamer’s voice.", style = MaterialTheme.typography.bodySmall)
+                    if (audioTracks == 1) {
+                        Text("This file has one audio track. Use Custom text if gameplay and voice are mixed together.",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        repeat(trackCount.coerceAtLeast(0)) { index ->
+                            FilterChip(selected = index == streamerTrack, enabled = !generatingCaptions,
+                                onClick = { streamerTrack = index }, label = { Text("Track ${index + 1}") })
+                        }
+                    }
+                    val trackMessage = when (audioTracks) {
+                        null -> "Reading audio tracks…"
+                        -1 -> "Could not read this file’s audio tracks."
+                        0 -> "This file has no audio track."
+                        else -> null
+                    }
+                    trackMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(enabled = canCaption && streamerTrack in 0 until trackCount, onClick = {
+                            StudioSession.captions(context, part, start, end, language, streamerTrack)
+                            notify()
+                        }) { Text("Generate captions") }
+                        TextButton(enabled = !generatingCaptions,
+                            onClick = { languageIndex = (languageIndex + 1) % Languages.size }) { Text(Languages[languageIndex].first) }
+                    }
+                    if (end - start > StudioAnalysis.MAX_CAPTION_DURATION_MS) Text("Choose up to 2 minutes for automatic captions.")
+                }
+                if (!customCaptions && generatingCaptions) {
                     Text("Generating captions…", style = MaterialTheme.typography.bodySmall)
                 } else if (activeCues.isNotEmpty()) {
                     OutlinedButton(enabled = captionEnabled && canPreviewEdit, onClick = ::previewEdit) {
                         Text("Preview captions")
                     }
-                } else if (transcript.isNotEmpty()) {
+                } else if (!customCaptions && transcript.isNotEmpty()) {
                     Text("No captions overlap this trim. Generate captions for the selected range.",
                         style = MaterialTheme.typography.bodySmall)
                 }
-                if (transcript.isNotEmpty()) {
+                if (activeCues.isNotEmpty() || (!customCaptions && transcript.isNotEmpty())) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Switch(checked = captionEnabled, onCheckedChange = { captionEnabled = it })
                         Text("Burn into video")
-                        TextButton(onClick = { editCaptions = !editCaptions }) { Text(if (editCaptions) "Done" else "Edit text") }
+                        if (!customCaptions && transcript.isNotEmpty()) {
+                            TextButton(onClick = { editCaptions = !editCaptions }) { Text(if (editCaptions) "Done" else "Edit text") }
+                        }
                     }
                     Text("Caption style", style = MaterialTheme.typography.titleSmall)
                     val styles = listOf(CaptionPreset.CLEAN, CaptionPreset.KARAOKE, CaptionPreset.POP,
@@ -502,7 +547,9 @@ internal fun ClipEditor(
                                 label = { Text(item.label) })
                         }
                     }
-                    if (editCaptions) transcript.forEachIndexed { index, row ->
+                    Text("Caption size · $captionSize%", style = MaterialTheme.typography.titleSmall)
+                    Slider(captionSize.toFloat(), { captionSize = it.toInt() }, valueRange = 60f..150f, steps = 8)
+                    if (!customCaptions && editCaptions) transcript.forEachIndexed { index, row ->
                         OutlinedTextField(
                             value = row.text, onValueChange = { StudioSession.editTranscript(part.uri, index, it) },
                             label = { Text(timestamp(part.offsetMs + row.startMs)) }, modifier = Modifier.fillMaxWidth()
@@ -540,7 +587,7 @@ internal fun ClipEditor(
                         FilterChip(selected = normalize, onClick = { normalize = !normalize }, label = { Text("Normalize") })
                         FilterChip(selected = fades, onClick = { fades = !fades }, label = { Text("Add fades") })
                     }
-                    if (audioTracks >= 2) {
+                    if (trackCount >= 2) {
                         FilterChip(selected = mix, onClick = { mix = !mix }, label = { Text("Mix first two audio tracks") })
                         if (mix) {
                             Text("Track 1 · voice")

@@ -2,10 +2,10 @@ package com.clipstudio.app
 
 internal data class CaptionMemo(
     val part: SourcePart, val start: Long, val end: Long, val language: String?,
-    val words: List<TranscriptSegment>
+    val words: List<TranscriptSegment>, val audioTrack: Int
 ) {
-    fun covers(source: SourcePart, from: Long, to: Long, lang: String?) =
-        part == source && language == lang && start <= from && end >= to
+    fun covers(source: SourcePart, from: Long, to: Long, lang: String?, track: Int) =
+        part == source && language == lang && audioTrack == track && start <= from && end >= to
 }
 
 internal data class TrackingMemo(

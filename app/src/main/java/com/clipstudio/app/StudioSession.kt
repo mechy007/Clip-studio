@@ -26,7 +26,7 @@ internal data class StudioState(
     val jobs: Map<Work, String> = emptyMap(),
     val status: String = "",
     val exports: List<Uri> = emptyList(),
-    val transcripts: Map<Uri, List<TranscriptSegment>> = emptyMap(),
+    val transcripts: Map<Uri, CaptionMemo> = emptyMap(),
     val library: StudioLibrary = StudioLibrary(),
     val joined: SourcePart? = null,
     val joinRevision: Long = 0,
@@ -48,7 +48,8 @@ internal data class ExportClip(
     val audio: AudioFinish = AudioFinish(), val facePath: List<FacePoint> = emptyList(),
     val fastExport: Boolean = false, val originalFraming: Boolean = false, val highDetail: Boolean = false,
     val enhanceFacecam: Boolean = false,
-    val captionPosition: CaptionPosition = CaptionPosition.LOWER
+    val captionPosition: CaptionPosition = CaptionPosition.LOWER,
+    val captionSize: Int = 100
 )
 
 internal object StudioSession {
@@ -61,7 +62,6 @@ internal object StudioSession {
     private var autoAnalyze = true
     private var resumeAnalysis = false
     private val captionMemos = mutableListOf<CaptionMemo>()
-    private val activeCaptions = mutableMapOf<Uri, CaptionMemo>()
 
     fun initialize(context: Context) {
         if (initialized) return
@@ -200,14 +200,17 @@ internal object StudioSession {
     }
 
     fun captions(
-        context: Context, part: SourcePart, start: Long, end: Long, language: String?
-    ) = work(context, Work.CAPTIONS, "Generating offline captions") { app ->
-        val cached = captionMemos.lastOrNull { it.covers(part, start, end, language) }
+        context: Context, part: SourcePart, start: Long, end: Long, language: String?, audioTrack: Int
+    ) = work(context, Work.CAPTIONS, "Generating captions from audio track ${audioTrack + 1}") { app ->
+        val projectId = state.value.project?.id
+        val cached = captionMemos.lastOrNull { it.covers(part, start, end, language, audioTrack) }
         val memo = cached ?: CaptionMemo(part, start, end, language,
-            StudioAnalysis.captions(app, part, start, end, language)).also(::rememberCaptions)
-        activeCaptions[part.uri] = memo
-        if (activeCaptions.size > 24) activeCaptions.keys.firstOrNull { it != part.uri }?.let(activeCaptions::remove)
-        update { it.copy(transcripts = (it.transcripts + (part.uri to memo.words)).filterKeys(activeCaptions::containsKey)) }
+            StudioAnalysis.captions(app, part, start, end, language, audioTrack), audioTrack).also(::rememberCaptions)
+        if (projectId != state.value.project?.id) return@work
+        update {
+            val recent = (it.transcripts - part.uri + (part.uri to memo)).toList().takeLast(24).toMap()
+            it.copy(transcripts = recent)
+        }
         status(when {
             memo.words.isEmpty() -> "No speech found in this clip"
             cached != null -> "Reused captions for this range"
@@ -216,7 +219,7 @@ internal object StudioSession {
     }
 
     private fun rememberCaptions(memo: CaptionMemo) {
-        captionMemos.removeAll { it.covers(memo.part, memo.start, memo.end, memo.language) &&
+        captionMemos.removeAll { it.covers(memo.part, memo.start, memo.end, memo.language, memo.audioTrack) &&
             it.start == memo.start && it.end == memo.end }
         captionMemos += memo
         if (captionMemos.size > 24) captionMemos.removeAt(0)
@@ -270,17 +273,16 @@ internal object StudioSession {
         }
 
     fun editTranscript(uri: Uri, index: Int, text: String) {
-        val transcript = state.value.transcripts[uri] ?: return
+        val memo = state.value.transcripts[uri] ?: return
+        val transcript = memo.words
         val row = transcript.getOrNull(index) ?: return
         val words = text.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
         val timing = if (words.size == row.words.size) row.words.zip(words) { word, value -> word.copy(word = value) }
         else emptyList()
         val updated = transcript.toMutableList().apply { set(index, row.copy(text = text, words = timing)) }
-        activeCaptions[uri]?.copy(words = updated)?.let {
-            activeCaptions[uri] = it
-            rememberCaptions(it)
-        }
-        update { it.copy(transcripts = it.transcripts + (uri to updated)) }
+        val edited = memo.copy(words = updated)
+        rememberCaptions(edited)
+        update { it.copy(transcripts = it.transcripts + (uri to edited)) }
     }
 
     fun queue(clip: ExportClip) {

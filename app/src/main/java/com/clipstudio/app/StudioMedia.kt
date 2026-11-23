@@ -267,7 +267,8 @@ internal object StudioMedia {
             val renderFilter = if (captions.isEmpty()) filter else {
                 val script = File.createTempFile("studio-captions-", ".ass", context.cacheDir)
                 subtitle = script
-                script.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight, clip.captionPosition))
+                script.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight,
+                    clip.captionPosition, clip.captionSize))
                 "$filter;[out]setpts=PTS-STARTPTS,ass=filename='${script.absolutePath}':fontsdir=/system/fonts[captioned]"
             }
             val video = if (subtitle == null) "[out]" else "[captioned]"
@@ -356,10 +357,12 @@ internal object StudioMedia {
     internal fun input(context: Context, uri: Uri): String =
         if (uri.scheme == "file") requireNotNull(uri.path) else FFmpegKitConfig.getSafParameterForRead(context, uri)
 
-    internal suspend fun decodeAudio(context: Context, part: SourcePart, file: File, startMs: Long, endMs: Long): Boolean =
+    internal suspend fun decodeAudio(
+        context: Context, part: SourcePart, file: File, startMs: Long, endMs: Long, audioTrack: Int = 0
+    ): Boolean =
         runFfmpeg(arrayOf(
             "-nostdin", "-loglevel", "error", "-y", "-ss", seconds(startMs),
-            "-i", input(context, part.uri), "-t", seconds(endMs - startMs), "-map", "0:a:0",
+            "-i", input(context, part.uri), "-t", seconds(endMs - startMs), "-map", "0:a:$audioTrack",
             "-vn", "-ar", "16000", "-af", "aformat=channel_layouts=mono", "-c:a", "pcm_f32be", "-f", "f32be", file.absolutePath
         ))
 

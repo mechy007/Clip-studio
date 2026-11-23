@@ -91,6 +91,24 @@ class ImportedWorkflowTest {
         assertTrue(upper.lineSequence().first { it.startsWith("Style:") }.endsWith(",8,86,86,192,1"))
     }
 
+    @Test fun customTextNeedsNoTranscriptAndFillsOnlyTheSelectedTrim() {
+        val cue = CaptionTrack.custom("  My custom caption  ", 1200).single()
+        assertEquals(CaptionCue(0, 1200, "My custom caption"), cue)
+        assertTrue(CaptionTrack.custom("  ", 1200).isEmpty())
+        assertTrue(CaptionTrack.custom("caption", 0).isEmpty())
+        val animation = AssKaraokeTrack.frames(listOf(cue))
+        assertEquals(0L, animation.first().startMs)
+        assertEquals(1200L, animation.last().endMs)
+    }
+
+    @Test fun changingCaptionSizeScalesTheRenderedStyle() {
+        val cues = CaptionTrack.custom("sample", 1000)
+        val smaller = AssKaraokeTrack.render(cues, CaptionPreset.CLEAN, 1080, 1920, sizePercent = 60)
+        val larger = AssKaraokeTrack.render(cues, CaptionPreset.CLEAN, 1080, 1920, sizePercent = 150)
+        assertTrue(smaller.contains("Style: Default,Roboto,35,"))
+        assertTrue(larger.contains("Style: Default,Roboto,89,"))
+    }
+
     @Test fun rendersEqual720PanelsAndMapsPreviewCropWithinBounds() {
         val filter = videoFilter(Layout.Split, Crop(0f, 1f, 3f), Crop(1f, 0f), resolution = 720)
         assertEquals(2, Regex("scale=720:640").findAll(filter).count())

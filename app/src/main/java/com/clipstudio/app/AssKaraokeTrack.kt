@@ -60,9 +60,9 @@ object AssKaraokeTrack {
 
     fun render(
         cues: List<CaptionCue>, preset: CaptionPreset, width: Int, height: Int,
-        position: CaptionPosition = CaptionPosition.LOWER
+        position: CaptionPosition = CaptionPosition.LOWER, sizePercent: Int = 100
     ): String = buildString {
-        val size = (minOf(width, height) * 0.055).toInt().coerceAtLeast(12)
+        val size = (minOf(width, height) * 0.055 * sizePercent.coerceIn(60, 150) / 100).toInt().coerceAtLeast(12)
         val outline = (size / if (preset == CaptionPreset.CLEAN) 18 else 12).coerceAtLeast(1)
         val border = if (preset == CaptionPreset.BOXED) 3 else 1
         val bold = if (preset == CaptionPreset.CLEAN) 0 else -1
