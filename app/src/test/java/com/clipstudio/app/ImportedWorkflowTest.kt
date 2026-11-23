@@ -97,10 +97,20 @@ class ImportedWorkflowTest {
             RecordingPartWindow(70 * 60_000L, 75 * 60_000L)
         ), parts)
         val samples = recordingSampleRanges(parts.first())
-        assertEquals(3, samples.size)
+        assertEquals(5, samples.size)
         assertTrue(samples.all { it.startMs >= start && it.endMs <= parts.first().endMs && it.lengthMs == 5_000L })
         val short = RecordingPartWindow(start, start + 1_000)
         assertEquals(listOf(short), recordingSampleRanges(short))
+    }
+
+    @Test fun aCheckpointKeepsTheSelectedEndWhenAReplayGrows() {
+        val selected = 75 * 60_000L
+        val expanded = 90 * 60_000L
+        val start = 60 * 60_000L
+        val expected = RecordingPartWindow(start, selected)
+        assertEquals(expected, savedRecordingRange(start, expanded, selected, null))
+        assertEquals(expected, savedRecordingRange(start, expanded, null, selected))
+        assertEquals(null, savedRecordingRange(start, expanded, null, start))
     }
 
     @Test fun recordingScanRanksMeasuredActivityAndKeepsUnsampledPartsSelectable() {
@@ -114,6 +124,8 @@ class ImportedWorkflowTest {
         assertTrue(requireNotNull(scores[1].score) > requireNotNull(scores[0].score))
         assertEquals(listOf(1, 1, 0), scores.map { it.samples })
         assertEquals(null, scores[2].score)
+        assertTrue(scores[0].needsSampling)
+        assertEquals(10_000L, scores[0].measurements.single().startMs)
     }
 
     @Test fun exactlyThirtyMinutesNeedsOnlyOnePart() {

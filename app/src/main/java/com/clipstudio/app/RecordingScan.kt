@@ -1,6 +1,11 @@
 package com.clipstudio.app
 
-internal data class RecordingScanPart(val range: RecordingPartWindow, val score: Int? = null, val samples: Int = 0)
+internal data class RecordingScanPart(
+    val range: RecordingPartWindow, val score: Int? = null, val samples: Int = 0,
+    val measurements: List<AudioEnergyWindow> = emptyList()
+) {
+    val needsSampling: Boolean get() = measurements.size < recordingSampleRanges(range).size
+}
 
 internal fun recordingScanRanges(startMs: Long, endMs: Long): List<RecordingPartWindow> =
     generateSequence(nextRecordingPart(startMs, endMs)) { nextRecordingPart(it.endMs, endMs) }.toList()
@@ -8,7 +13,7 @@ internal fun recordingScanRanges(startMs: Long, endMs: Long): List<RecordingPart
 internal fun recordingSampleRanges(part: RecordingPartWindow): List<RecordingPartWindow> {
     val length = minOf(5_000, part.lengthMs)
     val available = part.lengthMs - length
-    return listOf(15L, 50L, 85L).map { offset ->
+    return listOf(8L, 29L, 50L, 71L, 92L).map { offset ->
         val start = part.startMs + available * offset / 100
         RecordingPartWindow(start, start + length)
     }.distinct()
@@ -25,6 +30,6 @@ internal fun scoreRecordingScan(
         val score = if (measured.isNotEmpty() && peakRms > 0f && peakAmplitude > 0f) {
             AudioSignalScorer.score(part.startMs, part.endMs, measured, peakRms, peakAmplitude)
         } else null
-        RecordingScanPart(part, score, measured.size)
+        RecordingScanPart(part, score, measured.size, measured)
     }
 }

@@ -169,7 +169,8 @@ internal object StudioMedia {
             val format = if (audioOnly) "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]" else previousFormat?.also {
                 check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
             } ?: "bv[protocol=https][vcodec^=avc1][height<=1080]+ba[protocol=https][acodec^=mp4a]/" +
-                "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
+                "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]/" +
+                "bv[protocol=https][height<=1080]+ba[protocol=https]/b[protocol=https][height<=1080]"
             val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$id")
                 .addOption("--no-playlist")
                 .addOption("--no-warnings")
@@ -206,32 +207,45 @@ internal object StudioMedia {
     }
 
     suspend fun scanRecording(
-        context: Context, link: String, startMs: Long, progress: suspend (Int, Int) -> Unit
+        context: Context, link: String, startMs: Long, saved: List<RecordingScanPart>,
+        progress: suspend (Int, Int) -> Unit, checkpoint: suspend (List<RecordingScanPart>) -> Unit
     ): List<RecordingScanPart> = withContext(Dispatchers.IO) {
         val recording = withTimeoutOrNull(60_000) { resolveRecording(context, link, null, audioOnly = true) }
-            ?: error("Could not open the recording for analysis.")
-        val parts = recordingScanRanges(startMs, recording.endMs)
-        check(parts.isNotEmpty()) { "The start time must be before the end of the recording." }
-        val media = recording.inputs.firstOrNull() ?: return@withContext parts.map { RecordingScanPart(it) }
+            ?: error("Could not open the recording for analysis. Try again from Import.")
+        val original = saved.ifEmpty { recordingScanRanges(startMs, recording.endMs).map { RecordingScanPart(it) } }
+        check(original.isNotEmpty()) { "The start time must be before the end of the recording." }
+        checkpoint(original)
+        val media = recording.inputs.firstOrNull() ?: return@withContext original
         val headers = if (media.headers.isEmpty()) emptyList() else listOf("-headers", media.headers)
         val pcm = File.createTempFile("scan-audio-", ".pcm", context.cacheDir)
+        val samples = original.map { it.measurements.toMutableList() }
+        fun results(): List<RecordingScanPart> =
+            scoreRecordingScan(original.map { it.range }, samples).mapIndexed { index, result ->
+                if (result.samples == 0) original[index] else result
+            }
         try {
-            var consecutiveFailures = 0
-            val samples = parts.mapIndexed { index, part ->
-                currentCoroutineContext().ensureActive()
-                progress(index + 1, parts.size)
-                recordingSampleRanges(part).mapNotNull { window ->
-                    if (consecutiveFailures >= 3) return@mapNotNull null
+            val started = SystemClock.elapsedRealtime()
+            // Give every part one attempt before filling in extra samples.
+            for (sampleIndex in 0 until 5) {
+                for ((index, part) in original.withIndex()) {
+                    currentCoroutineContext().ensureActive()
+                    if (SystemClock.elapsedRealtime() - started >= 180_000L) return@withContext results()
+                    val window = recordingSampleRanges(part.range).getOrNull(sampleIndex) ?: continue
+                    if (samples[index].any { it.startMs == window.startMs }) continue
+                    progress(index + 1, original.size)
+                    pcm.delete()
                     val args = listOf("-nostdin", "-loglevel", "error", "-y", "-rw_timeout", "8000000") + headers +
                         listOf("-ss", seconds(window.startMs), "-i", media.url, "-t", seconds(window.lengthMs),
                             "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", pcm.absolutePath)
-                    val success = runFfmpeg(args.toTypedArray(), idleTimeoutMs = 9_000L) { }
-                    val measurement = if (success) measureRecordingSample(pcm, window) else null
-                    consecutiveFailures = if (measurement == null) consecutiveFailures + 1 else 0
-                    measurement
+                    if (runFfmpeg(args.toTypedArray(), idleTimeoutMs = 9_000L) { } && pcm.isFile) {
+                        measureRecordingSample(pcm, window)?.let { measurement ->
+                            samples[index].add(measurement)
+                            checkpoint(results())
+                        }
+                    }
                 }
             }
-            scoreRecordingScan(parts, samples)
+            results()
         } finally {
             pcm.delete()
         }
@@ -298,9 +312,19 @@ internal object StudioMedia {
         withContext(NonCancellable) { publish(part, range.endMs == durationMs) }
     }
 
-    private suspend fun resolveGuidedRecording(context: Context, link: String, previousFormat: String?): RecordingStreams =
-        withTimeoutOrNull(60_000) { resolveRecording(context, link, previousFormat) }
-            ?: error("The part downloader did not start. Use Download full video first to prepare parts locally.")
+    private suspend fun resolveGuidedRecording(context: Context, link: String, preferredFormat: String?): RecordingStreams {
+        if (preferredFormat != null) {
+            try {
+                withTimeoutOrNull(35_000) { resolveRecording(context, link, preferredFormat) }?.let { return it }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Formats can change between scans. Normalized chunks can still be reused.
+            }
+        }
+        return withTimeoutOrNull(60_000) { resolveRecording(context, link, null) }
+            ?: error("Could not open the video range. Retry this part when your connection is stable.")
+    }
 
     /** Commit each short piece locally so a retry does not fetch completed pieces again. */
     suspend fun downloadRecordingPart(
@@ -310,7 +334,8 @@ internal object StudioMedia {
         val directory = File(guidedDirectory(context, projectId), startMs.toString())
         val files = GuidedDownloadFiles(directory)
         var recording: RecordingStreams? = null
-        val plan = files.load(startMs) ?: run {
+        val savedPlan = files.load(startMs)
+        var plan = files.load(startMs, requestedEndMs) ?: run {
             val streams = resolveGuidedRecording(context, link, previousFormat)
             recording = streams
             val end = minOf(streams.endMs, requestedEndMs ?: streams.endMs)
@@ -320,15 +345,32 @@ internal object StudioMedia {
         }
         val range = plan.range
         val chunks = range.downloadChunks()
-        val publishedDuration = recordingDuration(context, files.output, range.lengthMs)
+        if (savedPlan != null && savedPlan.range != range) {
+            files.output.delete()
+            val oldChunks = savedPlan.range.downloadChunks()
+            oldChunks.forEachIndexed { index, old -> if (chunks.getOrNull(index) != old) files.chunk(index).delete() }
+        }
+        files.save(plan)
+        val publishedDuration = recordingDuration(context, files.output, range.lengthMs, requireAudio = true)
         val tryFast = fast && publishedDuration == null && chunks.indices.none { files.chunk(it).isFile }
-        val copied = tryFast && copyRecordingRange(context, link, plan, files, progress)
+        val copied = if (tryFast) {
+            val streams = recording ?: resolveGuidedRecording(context, link, plan.format).also { recording = it }
+            check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
+            plan = plan.copy(format = streams.format)
+            files.save(plan)
+            copyRecordingRange(context, link, plan, files, progress)
+        } else false
         if (tryFast && !copied) progress(GuidedDownloadProgress(0, null, newAttempt = true))
         if (publishedDuration == null && !copied) {
             files.output.delete()
+            var tracks: RecordingTracks? = null
             val completed = chunks.mapIndexed { index, chunk ->
                 val file = files.chunk(index)
-                val ready = recordingDuration(context, file, chunk.lengthMs) != null
+                val size = if (recordingDuration(context, file, chunk.lengthMs, requireAudio = true) != null) {
+                    FastMedia.downloadedTracks(context, Uri.fromFile(file), requireAudio = true)
+                } else null
+                val ready = size != null && (tracks == null || tracks == size)
+                if (ready) tracks = size
                 if (!ready) file.delete()
                 ready
             }
@@ -342,8 +384,14 @@ internal object StudioMedia {
                     if (completed[index]) continue
                     currentCoroutineContext().ensureActive()
                     val streams = recording ?: resolveGuidedRecording(context, link, plan.format).also { recording = it }
+                    if (streams.format != plan.format) {
+                        plan = plan.copy(format = streams.format)
+                        files.save(plan)
+                    }
                     check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
                     files.staging.delete()
+                    val chunkBytes = chunk.lengthMs * 650L
+                    checkDownloadSpace(directory, chunkBytes * if (useSectionDownloader) 2 else 1)
                     val beforeChunk = processed
                     val report: (Long) -> Unit = { time ->
                         progress(guidedDownloadProgress(range.lengthMs, saved, beforeChunk + time,
@@ -351,24 +399,33 @@ internal object StudioMedia {
                     }
                     if (!useSectionDownloader) {
                         useSectionDownloader = !encodeRecordingChunk(context, streams.inputs, chunk.startMs,
-                            chunk.lengthMs, files.staging, remote = true, progress = report)
+                            chunk.lengthMs, files.staging, remote = true, tracks = tracks, progress = report)
                     }
                     if (useSectionDownloader) {
-                        downloadAndNormalizeSection(context, link, plan.format, chunk, files.staging, report)
+                        checkDownloadSpace(directory, chunkBytes * 2)
+                        downloadAndNormalizeSection(context, link, streams.format, chunk, files.staging, tracks, report)
                     }
                     check(files.staging.renameTo(files.chunk(index))) { "Could not save the downloaded piece." }
+                    if (tracks == null) {
+                        tracks = FastMedia.downloadedTracks(context, Uri.fromFile(files.chunk(index)), requireAudio = true)
+                    }
                     processed += chunk.lengthMs
                     progress(guidedDownloadProgress(range.lengthMs, saved, processed, SystemClock.elapsedRealtime() - started))
                 }
                 progress(GuidedDownloadProgress(100, null, assembling = true))
-                files.concatList.writeText(buildString {
-                    appendLine("ffconcat version 1.0")
-                    chunks.indices.forEach { index -> appendLine("file ${files.chunk(index).name}") }
-                })
-                check(runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-safe", "1",
-                    "-i", files.concatList.absolutePath, "-c", "copy", "-movflags", "+faststart", files.staging.absolutePath)) &&
-                    recordingDuration(context, files.staging, range.lengthMs) != null && files.staging.renameTo(files.output)
-                ) { "Could not assemble this part. Retry to reuse the downloaded pieces." }
+                if (chunks.size == 1) {
+                    check(files.chunk(0).renameTo(files.output)) { "Could not save the completed range. Retry to reuse it." }
+                } else {
+                    checkDownloadSpace(directory, chunks.indices.sumOf { files.chunk(it).length() })
+                    files.concatList.writeText(buildString {
+                        appendLine("ffconcat version 1.0")
+                        chunks.indices.forEach { index -> appendLine("file ${files.chunk(index).name}") }
+                    })
+                    check(runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-safe", "1",
+                        "-i", files.concatList.absolutePath, "-c", "copy", "-movflags", "+faststart", files.staging.absolutePath)) &&
+                        recordingDuration(context, files.staging, range.lengthMs, requireAudio = true) != null && files.staging.renameTo(files.output)
+                    ) { "Could not assemble this part. Retry to reuse the downloaded pieces." }
+                }
             } finally {
                 files.staging.delete()
                 files.concatList.delete()
@@ -378,8 +435,16 @@ internal object StudioMedia {
         val actualDuration = publishedDuration ?: duration(context, url)
         currentCoroutineContext().ensureActive()
         withContext(NonCancellable) {
-            publish(SourcePart(url, range.startMs, actualDuration, range.endMs, plan.format), range.endMs == plan.recordingEndMs)
+            publish(SourcePart(url, range.startMs, actualDuration, range.endMs, recording?.format ?: plan.format), range.endMs == plan.recordingEndMs)
             chunks.indices.forEach { files.chunk(it).delete() }
+        }
+    }
+
+    private fun checkDownloadSpace(directory: File, outputBytes: Long) {
+        val freeBytes = directory.usableSpace
+        val required = outputBytes + 24L * 1024 * 1024
+        check(freeBytes >= required) {
+            "Free up at least ${(required - freeBytes + 1_048_575) / 1_048_576} MB to continue. Saved pieces were kept."
         }
     }
 
@@ -392,11 +457,34 @@ internal object StudioMedia {
         if (!folder.mkdir()) return false
         val range = plan.range
         val started = SystemClock.elapsedRealtime()
-        progress(GuidedDownloadProgress(0, null))
+        progress(GuidedDownloadProgress(0, null, bytesFetched = 0))
         try {
-            val media = YouTubeVideoImporter.downloadSection(context, link, plan.format, range, folder, copyTracks = true) {
-                progress(guidedDownloadProgress(range.lengthMs, 0, it, SystemClock.elapsedRealtime() - started))
-            }
+            val encodedTime = java.util.concurrent.atomic.AtomicLong()
+            val media = coroutineScope {
+                val transfer = async {
+                    YouTubeVideoImporter.downloadSection(context, link, plan.format, range, folder, copyTracks = true) {
+                        encodedTime.set(it)
+                    }
+                }
+                var lastBytes = 0L
+                var lastTime = 0L
+                var lastActivity = started
+                while (!transfer.isCompleted) {
+                    delay(1_000)
+                    val bytes = folder.listFiles()?.sumOf { it.length() } ?: 0L
+                    val time = encodedTime.get()
+                    val now = SystemClock.elapsedRealtime()
+                    if (bytes != lastBytes || time > lastTime) lastActivity = now
+                    lastBytes = bytes
+                    lastTime = time
+                    if (now - lastActivity >= 45_000) {
+                        transfer.cancel()
+                        return@coroutineScope null
+                    }
+                    progress(guidedDownloadProgress(range.lengthMs, 0, time, now - started).copy(bytesFetched = bytes))
+                }
+                transfer.await()
+            } ?: return false
             val actual = recordingDuration(context, media, range.lengthMs) ?: return false
             if (abs(actual - range.lengthMs) > 350L || !FastMedia.matchesDownloadedPart(context, Uri.fromFile(media))) {
                 return false
@@ -413,7 +501,7 @@ internal object StudioMedia {
 
     private suspend fun downloadAndNormalizeSection(
         context: Context, link: String, format: String, range: RecordingPartWindow, output: File,
-        progress: (Long) -> Unit
+        tracks: RecordingTracks?, progress: (Long) -> Unit
     ) {
         val staging = File(output.parentFile, "section-download")
         staging.deleteRecursively()
@@ -432,7 +520,7 @@ internal object StudioMedia {
                 "The alternate downloader returned an incomplete range. Saved pieces were kept."
             }
             check(encodeRecordingChunk(context, listOf(MediaStream(section.absolutePath, "")),
-                0L, range.lengthMs, output, remote = false) { progress(range.lengthMs * 3 / 4 + it / 4) }) {
+                0L, range.lengthMs, output, remote = false, tracks = tracks) { progress(range.lengthMs * 3 / 4 + it / 4) }) {
                 "The range downloaded but could not be converted to MP4. Saved pieces were kept."
             }
         } finally {
@@ -442,7 +530,7 @@ internal object StudioMedia {
 
     private suspend fun encodeRecordingChunk(
         context: Context, inputs: List<MediaStream>, startMs: Long, lengthMs: Long, output: File,
-        remote: Boolean, progress: (Long) -> Unit
+        remote: Boolean, tracks: RecordingTracks? = null, progress: (Long) -> Unit
     ): Boolean {
         val seek = if (startMs == 0L) emptyList() else listOf("-ss", seconds(startMs))
         val inputArgs = inputs.flatMap { stream ->
@@ -452,8 +540,11 @@ internal object StudioMedia {
         }
         val codec = listOf("-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart")
+        val scale = tracks?.let { listOf("-vf", "scale=${it.width}:${it.height}") }.orEmpty()
+        val audioSettings = tracks?.sampleRate?.let { listOf("-ar", it.toString()) }.orEmpty() +
+            tracks?.channels?.let { listOf("-ac", it.toString()) }.orEmpty()
         val args = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + listOf("-t", seconds(lengthMs),
-            "-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0") + codec + output.absolutePath
+            "-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0") + scale + audioSettings + codec + output.absolutePath
         val lastUpdate = java.util.concurrent.atomic.AtomicLong()
         val succeeded = runFfmpeg(args.toTypedArray(), idleTimeoutMs = if (remote) 45_000L else null) { time ->
             val now = SystemClock.elapsedRealtime()
@@ -462,13 +553,15 @@ internal object StudioMedia {
                 progress(time.coerceIn(0, lengthMs))
             }
         }
-        return succeeded && recordingDuration(context, output, lengthMs) != null
+        return succeeded && recordingDuration(context, output, lengthMs, requireAudio = true) != null
     }
 
-    private suspend fun recordingDuration(context: Context, file: File, expected: Long): Long? {
+    private suspend fun recordingDuration(context: Context, file: File, expected: Long, requireAudio: Boolean = false): Long? {
         if (!YouTubeDownloadValidation.isValidMp4(file)) return null
         return try {
-            duration(context, Uri.fromFile(file)).takeIf { abs(it - expected) <= minOf(1500L, expected / 5) }
+            val uri = Uri.fromFile(file)
+            if (FastMedia.downloadedTracks(context, uri, requireAudio) == null) return null
+            duration(context, uri).takeIf { abs(it - expected) <= minOf(1500L, expected / 5) }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) { null }
