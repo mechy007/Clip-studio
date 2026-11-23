@@ -1,5 +1,7 @@
 package com.clipstudio.app
 
+import java.text.Bidi
+
 data class TimedWord(val startMs: Long, val endMs: Long, val word: String)
 
 internal data class CaptionFrame(
@@ -56,12 +58,20 @@ object AssKaraokeTrack {
         }
     }
 
-    fun render(cues: List<CaptionCue>, preset: CaptionPreset, width: Int, height: Int): String = buildString {
+    fun render(
+        cues: List<CaptionCue>, preset: CaptionPreset, width: Int, height: Int,
+        position: CaptionPosition = CaptionPosition.LOWER
+    ): String = buildString {
         val size = (minOf(width, height) * 0.055).toInt().coerceAtLeast(12)
         val outline = (size / if (preset == CaptionPreset.CLEAN) 18 else 12).coerceAtLeast(1)
         val border = if (preset == CaptionPreset.BOXED) 3 else 1
         val bold = if (preset == CaptionPreset.CLEAN) 0 else -1
-        val margin = (height * if (height > width) 0.20 else 0.10).toInt()
+        val margin = when (position) {
+            CaptionPosition.LOWER -> (height * if (height > width) 0.20 else 0.10).toInt()
+            CaptionPosition.CENTER -> 0
+            CaptionPosition.UPPER -> height / 10
+        }
+        val baseColor = if (preset == CaptionPreset.BOUNCE) "&H0088FF00" else "&H00FFFFFF"
         val horizontal = (width * 0.08).toInt()
         appendLine("[Script Info]")
         appendLine("ScriptType: v4.00+")
@@ -72,7 +82,7 @@ object AssKaraokeTrack {
         appendLine()
         appendLine("[V4+ Styles]")
         appendLine("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
-        appendLine("Style: Default,Roboto,$size,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,$bold,0,0,0,100,100,0,0,$border,$outline,1,2,$horizontal,$horizontal,$margin,1")
+        appendLine("Style: Default,Roboto,$size,$baseColor,$baseColor,&H00000000,&H80000000,$bold,0,0,0,100,100,0,0,$border,$outline,1,${position.alignment},$horizontal,$horizontal,$margin,1")
         appendLine()
         appendLine("[Events]")
         appendLine("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
@@ -81,15 +91,36 @@ object AssKaraokeTrack {
         }
         for (frame in timeline) {
             if (frame.endMs / 10 <= frame.startMs / 10) continue
+            val wipe = preset == CaptionPreset.WIPE && frame.activeIndex >= 0 &&
+                frame.words.none { word ->
+                    val chars = word.toCharArray()
+                    Bidi.requiresBidi(chars, 0, chars.size)
+                }
             val text = frame.words.mapIndexed { index, word ->
                 val safe = word.replace('\\', '＼').replace('{', '｛').replace('}', '｝')
                     .replace("\r", "").replace("\n", "\\N")
-                if (index != frame.activeIndex) safe
-                else if (preset == CaptionPreset.POP) {
-                    val transition = minOf(POP_DURATION_MS, frame.endMs - frame.startMs)
-                    "{\\c&H6AFF57&\\fscx116\\fscy116\\t(0,$transition,\\fscx100\\fscy100)}$safe{\\r}"
+                if (index != frame.activeIndex) {
+                    if (wipe) "{\\k0}$safe" else safe
                 } else {
-                    "{\\c&H1FD2FF&}$safe{\\r}"
+                    val duration = frame.endMs - frame.startMs
+                    val effect = when (preset) {
+                        CaptionPreset.POP -> {
+                            val transition = minOf(POP_DURATION_MS, duration)
+                            "\\c&H6AFF57&\\fscx116\\fscy116\\t(0,$transition,\\fscx100\\fscy100)"
+                        }
+                        // Bounce and karaoke fill adapted from AI Video Captions (MIT, AutoShorts).
+                        CaptionPreset.BOUNCE -> {
+                            val settle = minOf(duration, 100L)
+                            val peak = settle / 2
+                            "\\t(0,$peak,\\fscx120\\fscy120)\\t($peak,$settle,\\fscx100\\fscy100)\\c&HFF00FF&"
+                        }
+                        CaptionPreset.WIPE -> {
+                            val centiseconds = frame.endMs / 10 - frame.startMs / 10
+                            if (wipe) "\\kf$centiseconds\\c&H1FD2FF&" else "\\c&H1FD2FF&"
+                        }
+                        else -> "\\c&H1FD2FF&"
+                    }
+                    "{$effect}$safe{\\r}"
                 }
             }.joinToString(" ")
             appendLine("Dialogue: 0,${timestamp(frame.startMs)},${timestamp(frame.endMs)},Default,,0,0,0,,$text")

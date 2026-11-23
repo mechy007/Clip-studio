@@ -13,7 +13,15 @@ enum class CaptionPreset(val label: String, val animated: Boolean = false) {
     BOLD("Bold"),
     KARAOKE("Karaoke", animated = true),
     POP("Pop", animated = true),
-    BOXED("Boxed")
+    BOXED("Boxed"),
+    BOUNCE("Bounce", animated = true),
+    WIPE("Karaoke Wipe", animated = true)
+}
+
+enum class CaptionPosition(val label: String, internal val alignment: Int) {
+    LOWER("Lower", 2),
+    CENTER("Center", 5),
+    UPPER("Upper", 8)
 }
 
 /** Converts source-relative transcripts to clip-relative captions for render and SRT export. */
