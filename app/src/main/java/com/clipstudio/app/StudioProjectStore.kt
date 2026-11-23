@@ -16,11 +16,23 @@ internal data class StudioProject(
     val youtubeLink: String? = null, val importComplete: Boolean = false,
     val mode: HighlightMode = HighlightMode.BALANCED, val exports: List<Uri> = emptyList(),
     val renderStats: Map<Uri, RenderStats> = emptyMap(),
-    val guidedImport: Boolean = false
+    val guidedImport: Boolean = false,
+    val guidedStartMs: Long = 0,
+    val drafts: Map<Uri, ClipDraft> = emptyMap()
 ) {
     val latestSourcePart: SourcePart? get() = parts.asSequence().map { it.part }
         .filter { !it.joined }.maxByOrNull { it.nextOffsetMs }
 }
+
+internal data class ClipDraft(
+    val edit: ExportClip,
+    val captionEnabled: Boolean,
+    val customCaptions: Boolean,
+    val customText: String,
+    val audioTrack: Int,
+    val language: String?,
+    val transcript: CaptionMemo?
+)
 
 internal data class CreatorPreset(
     val name: String, val layout: Layout, val camera: Crop, val game: Crop,
@@ -87,6 +99,16 @@ internal class StudioProjectStore(context: Context) {
                 }.getOrNull()
             }
         }.orEmpty()
+        val drafts = root.optJSONArray("drafts")?.let { items ->
+            (0 until items.length()).mapNotNull { index ->
+                runCatching {
+                    val row = items.getJSONObject(index)
+                    val edit = row.getJSONObject("edit")
+                    val part = sources[edit.getString("uri")]?.part ?: return@runCatching null
+                    part.uri to row.draft(edit.exportClip(part))
+                }.getOrNull()
+            }.toMap()
+        }.orEmpty()
         val exports = root.optJSONArray("exports") ?: JSONArray()
         val timings = root.optJSONObject("renderStats") ?: JSONObject()
         val renderStats = timings.keys().asSequence().mapNotNull { key ->
@@ -99,7 +121,7 @@ internal class StudioProjectStore(context: Context) {
             root.optString("id", UUID.randomUUID().toString()),
             root.optString("youtube", "").takeIf { it.isNotEmpty() },
             root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
-            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, root.optBoolean("guidedImport"))
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, root.optBoolean("guidedImport"), root.optLong("guidedStartMs"), drafts)
     }
 
     fun save(library: StudioLibrary) {
@@ -143,6 +165,7 @@ internal class StudioProjectStore(context: Context) {
             .put("id", project.id).put("youtube", project.youtubeLink.orEmpty()).put("complete", project.importComplete)
             .put("mode", project.mode.name).put("exports", JSONArray(project.exports.map(Uri::toString))).put("renderStats", timings)
             .put("parts", rows).put("queue", queue).put("guidedImport", project.guidedImport)
+            .put("guidedStartMs", project.guidedStartMs).put("drafts", JSONArray(project.drafts.values.map { it.json() }))
     }
 
     private fun CreatorPreset.json() = JSONObject().put("name", name).put("layout", layout.name)
@@ -163,29 +186,53 @@ internal class StudioProjectStore(context: Context) {
             audio.optDouble("voice", 1.0).toFloat(), audio.optDouble("game", .6).toFloat())
     }
 
-    private fun ExportClip.json(): JSONObject {
+    private fun ClipDraft.json(): JSONObject = JSONObject().put("edit", edit.json())
+        .put("captionEnabled", captionEnabled).put("customCaptions", customCaptions).put("customText", customText)
+        .put("audioTrack", audioTrack).put("language", language ?: JSONObject.NULL).apply {
+            transcript?.let { memo ->
+                put("transcript", JSONObject().put("start", memo.start).put("end", memo.end)
+                    .put("track", memo.audioTrack).put("language", memo.language ?: JSONObject.NULL)
+                    .put("words", memo.words.map { CaptionCue(it.startMs, it.endMs, it.text, it.words) }.json()))
+            }
+        }
+
+    private fun JSONObject.draft(edit: ExportClip): ClipDraft {
+        val transcript = optJSONObject("transcript")?.let { row ->
+            CaptionMemo(edit.part, row.getLong("start"), row.getLong("end"),
+                row.optString("language").takeUnless { row.isNull("language") },
+                row.getJSONArray("words").cues().map { TranscriptSegment(it.startMs, it.endMs, it.text, it.words) },
+                row.getInt("track"))
+        }
+        return ClipDraft(edit, optBoolean("captionEnabled", true), optBoolean("customCaptions"),
+            optString("customText"), optInt("audioTrack"),
+            optString("language").takeUnless { isNull("language") }, transcript)
+    }
+
+    private fun List<CaptionCue>.json(): JSONArray {
         val rows = JSONArray()
-        captions.forEach { cue ->
+        forEach { cue ->
             val words = JSONArray()
             cue.words.forEach { words.put(JSONArray(listOf(it.startMs, it.endMs, it.word))) }
             rows.put(JSONObject().put("start", cue.startMs).put("end", cue.endMs).put("text", cue.text).put("words", words))
         }
-        return JSONObject().put("uri", part.uri.toString()).put("start", start).put("end", end)
+        return rows
+    }
+
+    private fun ExportClip.json(): JSONObject =
+        JSONObject().put("uri", part.uri.toString()).put("start", start).put("end", end)
             .put("layout", layout.name).put("camera", camera.json()).put("gameplay", gameplay.json())
-            .put("width", width).put("muted", muted).put("preset", preset.name).put("captions", rows)
+            .put("width", width).put("muted", muted).put("preset", preset.name).put("captions", captions.json())
             .put("audio", audio.json()).put("fast", fastExport).put("original", originalFraming).put("detail", highDetail)
             .put("enhanceFacecam", enhanceFacecam).put("captionPosition", captionPosition.name).put("captionSize", captionSize)
             .put("tracking", JSONArray(facePath.map { JSONArray(listOf(it.timeMs, it.x.toDouble(), it.y.toDouble())) }))
-    }
 
     private fun Crop.json() = JSONArray(listOf(x.toDouble(), y.toDouble(), zoom.toDouble()))
 
     private fun JSONArray.crop() = Crop(getDouble(0).toFloat(), getDouble(1).toFloat(), getDouble(2).toFloat())
 
-    private fun JSONObject.exportClip(part: SourcePart): ExportClip {
-        val rows = getJSONArray("captions")
-        val captions = (0 until rows.length()).map { index ->
-            val row = rows.getJSONObject(index)
+    private fun JSONArray.cues(): List<CaptionCue> =
+        (0 until length()).map { index ->
+            val row = getJSONObject(index)
             val words = row.getJSONArray("words")
             CaptionCue(row.getLong("start"), row.getLong("end"), row.getString("text"),
                 (0 until words.length()).map { item ->
@@ -193,6 +240,8 @@ internal class StudioProjectStore(context: Context) {
                     TimedWord(word.getLong(0), word.getLong(1), word.getString(2))
                 })
         }
+    private fun JSONObject.exportClip(part: SourcePart): ExportClip {
+        val captions = getJSONArray("captions").cues()
         val tracking = optJSONArray("tracking") ?: JSONArray()
         val path = (0 until tracking.length()).map { index ->
             val point = tracking.getJSONArray(index)

@@ -28,6 +28,7 @@ internal data class StudioState(
     val exports: List<Uri> = emptyList(),
     val transcripts: Map<Uri, CaptionMemo> = emptyMap(),
     val library: StudioLibrary = StudioLibrary(),
+    val persistedDrafts: Map<String, Map<Uri, ClipDraft>> = emptyMap(),
     val joined: SourcePart? = null,
     val joinRevision: Long = 0,
     val guidedPart: SourcePart? = null,
@@ -82,6 +83,7 @@ internal object StudioSession {
                 update { it.copy(storageWarning = "Saved projects could not be opened. Existing files were kept. Reopen Clip Studio to retry.") }
                 return@launch
             }
+            update { it.copy(persistedDrafts = recovered.projects.associate { project -> project.id to project.drafts }) }
             val ongoing = state.value
             if (ongoing.project == null) {
                 val project = recovered.projects.firstOrNull { it.id == recovered.currentId } ?: recovered.projects.firstOrNull()
@@ -97,6 +99,7 @@ internal object StudioSession {
             for (library in saves) {
                 try {
                     withContext(Dispatchers.IO) { store.save(library) }
+                    update { it.copy(persistedDrafts = library.projects.associate { project -> project.id to project.drafts }) }
                 } catch (_: java.io.IOException) {
                     update { it.copy(status = "Could not save the project. You can still export clips.") }
                 }
@@ -113,10 +116,10 @@ internal object StudioSession {
             status("Video ready")
         }
 
-    fun importYouTube(context: Context, link: String, layout: Layout, guided: Boolean = false) =
+    fun importYouTube(context: Context, link: String, layout: Layout, guided: Boolean = false, startMs: Long = 0) =
         work(context, Work.IMPORT, "Opening YouTube recording") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
-            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided)
+            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided, startMs)
             if (guided) importGuidedPart(app) else importRecording(app, link)
         }
 
@@ -135,7 +138,7 @@ internal object StudioSession {
         val partNumber = project.parts.count { !it.part.joined } + 1
         describe(Work.IMPORT, "Downloading part $partNumber")
         var downloaded = false
-        StudioMedia.downloadRecordingPart(app, link, previous?.nextOffsetMs ?: 0L, previous?.formatId) { part, last ->
+        StudioMedia.downloadRecordingPart(app, link, previous?.nextOffsetMs ?: project.guidedStartMs, previous?.formatId) { part, last ->
             withContext(Dispatchers.Main.immediate) {
                 addPart(app, part)
                 if (last) state.value.project?.let { save(it.copy(importComplete = true)) }
@@ -145,6 +148,7 @@ internal object StudioSession {
             }
         }
         if (!downloaded) {
+            check(previous != null) { "The start time must be before the end of the recording." }
             state.value.project?.let { save(it.copy(importComplete = true)) }
             status("All parts downloaded")
         }
@@ -228,10 +232,14 @@ internal object StudioSession {
     fun captions(
         context: Context, part: SourcePart, start: Long, end: Long, language: String?, audioTrack: Int
     ) = work(context, Work.CAPTIONS, "Generating captions from audio track ${audioTrack + 1}") { app ->
-        val projectId = state.value.project?.id
+        val projectId = state.value.project?.id ?: return@work
         val cached = captionMemos.lastOrNull { it.covers(part, start, end, language, audioTrack) }
         val memo = cached ?: CaptionMemo(part, start, end, language,
             StudioAnalysis.captions(app, part, start, end, language, audioTrack), audioTrack).also(::rememberCaptions)
+        updateProject(projectId) { owner ->
+            val draft = owner.drafts[part.uri] ?: return@updateProject owner
+            owner.copy(drafts = owner.drafts + (part.uri to draft.copy(transcript = memo)))
+        }
         if (projectId != state.value.project?.id) return@work
         update {
             val recent = (it.transcripts - part.uri + (part.uri to memo)).toList().takeLast(24).toMap()
@@ -303,6 +311,23 @@ internal object StudioSession {
             if (count > 0) status(if (count == 1) "Saved to Movies/Clip Studio" else "$count clips saved to Movies/Clip Studio")
         }
 
+    fun restoreDraftTranscript(projectId: String, memo: CaptionMemo) {
+        if (state.value.project?.id != projectId || memo.part.uri in state.value.transcripts) return
+        rememberCaptions(memo)
+        update { it.copy(transcripts = it.transcripts + (memo.part.uri to memo)) }
+    }
+
+    fun saveDraft(projectId: String, draft: ClipDraft, create: Boolean) {
+        val project = state.value.library.projects.firstOrNull { it.id == projectId } ?: return
+        val uri = draft.edit.part.uri
+        val saved = project.drafts[uri]
+        if ((!create && saved == null) || project.parts.none { it.part.uri == uri }) return
+        val activeMemo = state.value.transcripts[uri].takeIf { state.value.project?.id == projectId }
+        val updated = draft.copy(transcript = activeMemo ?: saved?.transcript ?: draft.transcript)
+        if (saved == updated) return
+        updateProject(projectId) { it.copy(drafts = it.drafts + (uri to updated)) }
+    }
+
     fun editTranscript(uri: Uri, index: Int, text: String) {
         val memo = state.value.transcripts[uri] ?: return
         val transcript = memo.words
@@ -373,11 +398,13 @@ internal object StudioSession {
         persist(library.copy(presets = presets.take(12)))
     }
 
-    private fun newProject(name: String, layout: Layout, link: String? = null, guided: Boolean = false) {
+    private fun newProject(
+        name: String, layout: Layout, link: String? = null, guided: Boolean = false, startMs: Long = 0
+    ) {
         autoAnalyze = true
         clearPlayback()
         update { it.copy(exports = emptyList(), transcripts = emptyMap(), joined = null, guidedPart = null, status = "") }
-        save(StudioProject(name, layout, emptyList(), youtubeLink = link, guidedImport = guided))
+        save(StudioProject(name, layout, emptyList(), youtubeLink = link, guidedImport = guided, guidedStartMs = startMs))
     }
 
     private fun save(project: StudioProject) {
