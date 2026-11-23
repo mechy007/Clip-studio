@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancelAndJoin
@@ -19,7 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-internal enum class Work { IMPORT, ANALYZE, CAPTIONS, EXPORT, JOIN, PREVIEW }
+internal enum class Work { IMPORT, ANALYZE, CAPTIONS, EXPORT, JOIN, PREVIEW, STORAGE }
 
 internal data class StudioState(
     val project: StudioProject? = null,
@@ -37,6 +38,7 @@ internal data class StudioState(
     val storageWarning: String? = null,
     val playback: Pair<ExportClip, Uri>? = null,
     val queueExportActive: Boolean = false,
+    val finishingPart: Boolean = false,
     val exportingClip: ExportClip? = null,
     val tracking: List<TrackingMemo> = emptyList()
 ) {
@@ -200,8 +202,8 @@ internal object StudioSession {
 
     fun join(context: Context, first: SourcePart, second: SourcePart) = work(context, Work.JOIN, "Joining sections") { app ->
         val project = state.value.project ?: return@work
-        if (project.parts.none { it.part == first } || project.parts.none { it.part == second }) return@work
-        val part = project.parts.map { it.part }.firstOrNull {
+        if (project.availableParts.none { it.part == first } || project.availableParts.none { it.part == second }) return@work
+        val part = project.availableParts.map { it.part }.firstOrNull {
             it.joined && it.offsetMs == first.offsetMs && it.nextOffsetMs == second.nextOffsetMs
         } ?: StudioMedia.join(app, listOf(first, second)).also { joined ->
             updateProject(project.id) { it.copy(parts = it.parts + PartReview(joined, emptyList())) }
@@ -231,7 +233,7 @@ internal object StudioSession {
         work(context, Work.ANALYZE, "Finding highlights") { app ->
             while (true) {
                 val current = state.value.project ?: break
-                val pending = current.parts.firstOrNull { it.highlights == null } ?: break
+                val pending = current.availableParts.firstOrNull { it.highlights == null } ?: break
                 describe(Work.ANALYZE, "Finding highlights · section ${current.parts.indexOf(pending) + 1}")
                 val highlights = StudioAnalysis.highlights(app, pending.part, current.mode)
                 updateProject(current.id) { project ->
@@ -279,24 +281,73 @@ internal object StudioSession {
 
     fun exportFirst(context: Context, clip: ExportClip) {
         val project = state.value.project ?: return
-        if (clip !in project.queue || clip == state.value.exportingClip) return
+        if (state.value.finishingPart || clip !in project.queue || clip == state.value.exportingClip) return
         val active = state.value.exportingClip?.takeIf { it in project.queue }
         save(project.copy(queue = listOfNotNull(active, clip) + project.queue.filter { it != active && it != clip }))
         if (jobs[Work.EXPORT] == null) export(context, listOf(clip), fromQueue = true)
     }
 
-    fun export(context: Context, clips: List<ExportClip>, fromQueue: Boolean = false) =
+    fun finishPart(context: Context, part: SourcePart) {
+        val project = state.value.project ?: return
+        if (jobs[Work.EXPORT] != null || jobs[Work.IMPORT] != null || jobs[Work.STORAGE] != null ||
+            !project.guidedImport || project.availableParts.none { it.part == part }) return
+        val queued = project.queue.filter { it.part == part }
+        if (queued.isNotEmpty()) {
+            export(context, queued, finishing = part)
+        } else if (part.uri in project.exportedParts) {
+            offerNextPart(project, part)
+            status("Part finished")
+        }
+    }
+
+    private fun offerNextPart(project: StudioProject, part: SourcePart) {
+        if (!project.importComplete && part == project.latestSourcePart) {
+            update { it.copy(guidedExportRevision = it.guidedExportRevision + 1) }
+        }
+    }
+
+    fun releasePart(context: Context, part: SourcePart) {
+        if (jobs.isNotEmpty()) return
+        work(context, Work.STORAGE, "Removing downloaded footage") { app ->
+            val project = state.value.project ?: return@work
+            if (!project.canRelease(part)) return@work
+            val shared = state.value.library.projects.any { owner ->
+                owner.id != project.id && owner.availableParts.any { it.part.uri == part.uri }
+            }
+            check(!shared) { "This footage is also used in another project." }
+            withContext(NonCancellable) {
+                withContext(Dispatchers.IO) {
+                    val path = part.uri.path
+                    check(part.uri.scheme == "file" && path != null) { "Only downloaded footage can be removed here." }
+                    val imports = File(app.filesDir, "imports").canonicalFile
+                    val source = File(path).canonicalFile
+                    check(source.path.startsWith(imports.path + File.separator)) { "Only downloaded footage can be removed here." }
+                    check(!source.exists() || source.isFile && source.delete()) { "Could not remove the downloaded footage." }
+                }
+                clearPlayback()
+                updateProject(project.id) { owner ->
+                    owner.copy(parts = owner.parts.map {
+                        if (it.part == part) it.copy(highlights = null, released = true) else it
+                    }, drafts = owner.drafts - part.uri)
+                }
+                captionMemos.removeAll { it.part == part }
+                update { it.copy(transcripts = it.transcripts - part.uri, tracking = it.tracking.filterNot { memo -> memo.part == part }) }
+                status("Downloaded footage removed")
+            }
+        }
+    }
+
+    fun export(context: Context, clips: List<ExportClip>, fromQueue: Boolean = false, finishing: SourcePart? = null) =
         work(context, Work.EXPORT, "Preparing export") { app ->
             val source = state.value.project ?: return@work
-            if (clips.isEmpty() || clips.any { clip -> source.parts.none { it.part == clip.part } }) return@work
+            if (clips.isEmpty() || clips.any { clip -> source.availableParts.none { it.part == clip.part } }) return@work
+            update { it.copy(queueExportActive = fromQueue, finishingPart = finishing != null) }
             jobs[Work.ANALYZE]?.let { analysis ->
                 resumeAnalysis = true
                 describe(Work.ANALYZE, "Pausing analysis for export")
                 analysis.cancelAndJoin()
             }
-            update { it.copy(queueExportActive = fromQueue) }
             var count = 0
-            var exportedLatestPart = false
             while (true) {
                 val clip = if (fromQueue) state.value.library.projects.firstOrNull { it.id == source.id }
                     ?.queue?.firstOrNull() else clips.getOrNull(count)
@@ -311,16 +362,17 @@ internal object StudioSession {
                     withContext(Dispatchers.Main.immediate) {
                         updateProject(source.id) { project ->
                             project.copy(exports = project.exports + uri,
-                                queue = if (fromQueue) project.queue - clip else project.queue,
+                                queue = if (fromQueue || finishing != null) project.queue - clip else project.queue,
+                                exportedParts = project.exportedParts + clip.part.uri,
                                 renderStats = (project.renderStats + (uri to stats)).toList().takeLast(24).toMap())
                         }
                     }
                 }
-                if (clip.part == source.latestSourcePart) exportedLatestPart = true
                 count++
             }
-            if (source.guidedImport && !source.importComplete && exportedLatestPart) {
-                update { it.copy(guidedExportRevision = it.guidedExportRevision + 1) }
+            if (finishing != null) {
+                val project = state.value.project
+                if (project?.id == source.id && project.queue.none { it.part == finishing }) offerNextPart(project, finishing)
             }
             if (count > 0) status(if (count == 1) "Saved to Movies/Clip Studio" else "$count clips saved to Movies/Clip Studio")
         }
@@ -335,7 +387,7 @@ internal object StudioSession {
         val project = state.value.library.projects.firstOrNull { it.id == projectId } ?: return
         val uri = draft.edit.part.uri
         val saved = project.drafts[uri]
-        if ((!create && saved == null) || project.parts.none { it.part.uri == uri }) return
+        if ((!create && saved == null) || project.availableParts.none { it.part.uri == uri }) return
         val activeMemo = state.value.transcripts[uri].takeIf { state.value.project?.id == projectId }
         val updated = draft.copy(transcript = activeMemo ?: saved?.transcript ?: draft.transcript)
         if (saved == updated) return
@@ -356,6 +408,7 @@ internal object StudioSession {
     }
 
     fun queue(clip: ExportClip) {
+        if (state.value.finishingPart || Work.STORAGE in jobs) return
         val project = state.value.project ?: return
         if (clip in project.queue || project.queue.size >= 10) return
         save(project.copy(queue = project.queue + clip))
@@ -450,7 +503,7 @@ internal object StudioSession {
     }
 
     private fun work(context: Context, key: Work, label: String, body: suspend (Context) -> Unit) {
-        if (jobs[key] != null) return
+        if (jobs[key] != null || Work.STORAGE in jobs) return
         val app = context.applicationContext
         initialize(app)
         if (jobs.isEmpty() && state.value.jobs.isEmpty()) {
@@ -479,10 +532,10 @@ internal object StudioSession {
                 // Start the replacement foreground work before publishing an idle state.
                 if (key == Work.EXPORT && resumeAnalysis) {
                     resumeAnalysis = false
-                    if (state.value.project?.parts?.any { it.highlights == null } == true) analyze(app)
+                    if (state.value.project?.availableParts?.any { it.highlights == null } == true) analyze(app)
                 }
                 update {
-                    if (key == Work.EXPORT) it.copy(jobs = it.jobs - key, exportingClip = null, queueExportActive = false)
+                    if (key == Work.EXPORT) it.copy(jobs = it.jobs - key, exportingClip = null, queueExportActive = false, finishingPart = false)
                     else if (key == Work.IMPORT) it.copy(jobs = it.jobs - key, guidedDownload = null)
                     else it.copy(jobs = it.jobs - key)
                 }
