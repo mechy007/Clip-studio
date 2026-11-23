@@ -9,6 +9,7 @@ import com.yausername.youtubedl_android.YoutubeDLException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import java.io.File
+import java.util.Locale
 import java.util.UUID
 
 object YouTubeVideoImporter {
@@ -26,6 +27,30 @@ object YouTubeVideoImporter {
             android.util.Log.w("ClipStudioYouTube", "Using the installed extractor", error)
         }
         initialized = true
+    }
+
+    internal suspend fun downloadSection(
+        context: Context, link: String, format: String, range: RecordingPartWindow, directory: File,
+        progress: (Long) -> Unit
+    ): File = runInterruptible(Dispatchers.IO) {
+        val videoId = YouTubeLinkClassifier.parseVideoId(link)
+        val bounds = String.format(Locale.US, "*%.3f-%.3f", range.startMs / 1000.0, range.endMs / 1000.0)
+        val target = File(directory, "section.mp4")
+        prepare(context)
+        val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+            .addOption("--no-playlist")
+            .addOption("--match-filter", "!is_live & !is_upcoming")
+            .addOption("--socket-timeout", 30)
+            .addOption("--retries", 2)
+            .addOption("-f", format)
+            .addOption("--download-sections", bounds)
+            .addOption("--force-keyframes-at-cuts")
+            .addOption("--merge-output-format", "mp4")
+            .addOption("-o", target.absolutePath)
+        YoutubeDL.execute(request, UUID.randomUUID().toString(), false) { percent, _, _ ->
+            if (percent >= 0) progress((range.lengthMs * percent.toDouble().coerceIn(0.0, 95.0) / 100).toLong())
+        }
+        target
     }
 
     suspend fun download(context: Context, url: String, height: Int, onProgress: (Int) -> Unit): Uri =

@@ -6,6 +6,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImportedWorkflowTest {
+    @Test fun guidedRequestsUseFormatHeadersWithoutLeakingCredentialsOrRanges() {
+        val headers = mediaRequestHeaders(
+            mapOf("User-Agent" to "Default player", "Cookie" to "private", "Range" to "bytes=0-"),
+            mapOf("user-agent" to "Selected format player", "Referer" to "https://www.youtube.com/",
+                "Origin" to "https://www.youtube.com\r\nX-Extra: rejected")
+        )
+        assertEquals("user-agent: Selected format player\r\nreferer: https://www.youtube.com/\r\n", headers)
+    }
+
     @Test fun preciseTimesUseMillisecondsAndValidateTheFraction() {
         assertEquals(5_040_125L, parseEditTime("1:24:00.125"))
         assertEquals(400L, parseEditTime("0:00.4"))

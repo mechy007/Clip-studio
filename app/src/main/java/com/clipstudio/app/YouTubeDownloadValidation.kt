@@ -47,3 +47,18 @@ internal object YouTubeDownloadValidation {
         }
     }
 }
+
+/** Forward the extractor's media headers, excluding credentials and request-specific ranges. */
+internal fun mediaRequestHeaders(vararg sources: Map<String, String>): String {
+    val allowed = setOf("user-agent", "referer", "origin", "accept", "accept-language")
+    val headers = linkedMapOf<String, String>()
+    sources.forEach { source ->
+        source.forEach { (key, value) ->
+            val name = key.lowercase(java.util.Locale.ROOT)
+            if (name in allowed && value.isNotBlank() && value.none { it < ' ' || it == '\u007f' }) {
+                headers[name] = value
+            }
+        }
+    }
+    return headers.entries.joinToString("") { (name, value) -> "$name: $value\r\n" }
+}
