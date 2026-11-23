@@ -3,14 +3,13 @@ package com.clipstudio.app
 import android.graphics.Bitmap
 import android.widget.MediaController
 import android.widget.VideoView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +26,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -36,6 +36,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
 private val CameraDefault = Crop(.05f, .85f, 3f)
@@ -48,12 +50,15 @@ private val Languages = listOf("Auto" to null, "English" to "en", "Malayalam" to
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ClipEditor(review: PartReview, layout: Layout, state: StudioState, notify: () -> Unit) {
+internal fun ClipEditor(
+    part: SourcePart, layout: Layout, state: StudioState, suggestedStart: Long, suggestedEnd: Long,
+    momentSelection: Int, notify: () -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val part = review.part
-    var start by rememberSaveable { mutableStateOf(0L) }
-    var end by rememberSaveable { mutableStateOf(minOf(30_000L, part.durationMs)) }
+    val suggested = suggestedStart in 0 until suggestedEnd && suggestedEnd <= part.durationMs
+    var start by rememberSaveable { mutableStateOf(if (suggested) suggestedStart else 0L) }
+    var end by rememberSaveable { mutableStateOf(if (suggested) suggestedEnd else minOf(30_000L, part.durationMs)) }
     var camera by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(CameraDefault) }
     var gameplay by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(GameplayDefault) }
     var width by rememberSaveable { mutableStateOf(1080) }
@@ -66,7 +71,17 @@ internal fun ClipEditor(review: PartReview, layout: Layout, state: StudioState, 
     var playing by rememberSaveable { mutableStateOf(false) }
     var faceStatus by remember { mutableStateOf("") }
     var frame by remember { mutableStateOf<Bitmap?>(null) }
-    var frameAt by rememberSaveable { mutableStateOf(0L) }
+    var frameAt by rememberSaveable { mutableStateOf(start) }
+    var appliedSelection by rememberSaveable { mutableStateOf(momentSelection) }
+    LaunchedEffect(momentSelection) {
+        if (suggested && appliedSelection != momentSelection) {
+            start = suggestedStart
+            end = suggestedEnd
+            frameAt = suggestedStart
+            playing = false
+        }
+        appliedSelection = momentSelection
+    }
     val busy = Work.EXPORT in state.jobs
     val transcript = state.transcripts[part.uri].orEmpty()
     val activeCues = remember(transcript, start, end, captionEnabled) {
@@ -80,26 +95,6 @@ internal fun ClipEditor(review: PartReview, layout: Layout, state: StudioState, 
         } catch (_: Exception) {
             null
         }
-    }
-    val highlights = review.highlights
-    if (!highlights.isNullOrEmpty()) {
-        Text("Suggested highlights", style = MaterialTheme.typography.titleLarge)
-        highlights.take(5).forEach { highlight ->
-            Card(onClick = {
-                start = highlight.startMs
-                end = highlight.endMs
-                frameAt = start
-                playing = false
-            }, enabled = !busy) {
-                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("${timestamp(part.offsetMs + highlight.startMs)} – ${timestamp(part.offsetMs + highlight.endMs)}",
-                        style = MaterialTheme.typography.titleSmall)
-                    Text(highlight.reason, color = MaterialTheme.colorScheme.secondary)
-                }
-            }
-        }
-    } else if (highlights != null) {
-        Text("No strong highlight signals in this section. You can trim it manually.")
     }
     Text("Framing", style = MaterialTheme.typography.titleLarge)
     if (playing) {
@@ -183,6 +178,28 @@ internal fun ClipEditor(review: PartReview, layout: Layout, state: StudioState, 
             )
         }
     }
+    val latestCues by rememberUpdatedState(activeCues)
+    var subtitleStatus by remember { mutableStateOf("") }
+    val saveSubtitles = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/x-subrip")) { uri ->
+        if (uri != null) {
+            val srt = CaptionTrack.toSrt(latestCues)
+            scope.launch {
+                subtitleStatus = try {
+                    withContext(Dispatchers.IO) {
+                        val stream = context.contentResolver.openOutputStream(uri) ?: error("Could not open subtitle file.")
+                        stream.writer(Charsets.UTF_8).use { it.write(srt) }
+                    }
+                    "Subtitle file saved"
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    "Could not save subtitle file"
+                }
+            }
+        }
+    }
+    if (activeCues.isNotEmpty()) TextButton(onClick = { saveSubtitles.launch("Clip Studio.srt") }) { Text("Save subtitles (.srt)") }
+    if (subtitleStatus.isNotBlank()) Text(subtitleStatus)
     TextButton(onClick = { options = !options }) { Text(if (options) "Hide export settings" else "Export settings · ${width}p") }
     if (options) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

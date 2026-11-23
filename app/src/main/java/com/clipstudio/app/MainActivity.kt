@@ -12,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -36,10 +39,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -67,6 +72,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun Dashboard() {
         val state by StudioSession.state.collectAsState()
@@ -74,6 +80,10 @@ class MainActivity : ComponentActivity() {
         var link by rememberSaveable { mutableStateOf("") }
         var incomingLayout by rememberSaveable { mutableStateOf(Layout.Split) }
         var selectedPart by rememberSaveable { mutableStateOf<String?>(null) }
+        var chosenMoment by rememberSaveable { mutableStateOf(-1L) }
+        var chosenEnd by rememberSaveable { mutableStateOf(-1L) }
+        var momentSelection by rememberSaveable { mutableStateOf(0) }
+        val editorAnchor = remember { BringIntoViewRequester() }
         var notificationAsked by rememberSaveable { mutableStateOf(false) }
         val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
         fun showNotificationPermission() {
@@ -88,6 +98,7 @@ class MainActivity : ComponentActivity() {
             if (uri != null) {
                 runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
                 selectedPart = null
+                chosenMoment = -1L
                 StudioSession.importLocal(this, uri, displayName(uri), incomingLayout)
                 showNotificationPermission()
             }
@@ -119,6 +130,7 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 selectedPart = null
+                                chosenMoment = -1L
                                 StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout)
                                 showNotificationPermission()
                             }
@@ -147,7 +159,10 @@ class MainActivity : ComponentActivity() {
                         if (expanded) project.parts.forEach { review ->
                             val part = review.part
                             FilterChip(
-                                selected = review == selected, onClick = { selectedPart = part.uri.toString() },
+                                selected = review == selected, onClick = {
+                                    chosenMoment = -1L
+                                    selectedPart = part.uri.toString()
+                                },
                                 enabled = !exporting, label = {
                                     Text("${timestamp(part.offsetMs)} – ${timestamp(part.offsetMs + part.durationMs)}")
                                 }
@@ -158,7 +173,38 @@ class MainActivity : ComponentActivity() {
                     if (project.parts.any { it.highlights == null } && Work.ANALYZE !in state.jobs) {
                         OutlinedButton(onClick = { StudioSession.analyze(this@MainActivity) }) { Text("Find highlights") }
                     }
-                    key(selected.part.uri) { ClipEditor(selected, project.layout, state, ::showNotificationPermission) }
+                    val suggestions = project.parts.flatMap { review ->
+                        review.highlights.orEmpty().map { review.part to it }
+                    }.sortedByDescending { it.second.score }.take(10)
+                    if (suggestions.isNotEmpty()) {
+                        Text("Suggested highlights", style = MaterialTheme.typography.titleLarge)
+                        suggestions.forEach { (part, highlight) ->
+                            Card(onClick = {
+                                selectedPart = part.uri.toString()
+                                chosenMoment = highlight.startMs
+                                chosenEnd = highlight.endMs
+                                momentSelection++
+                            }, enabled = !exporting) {
+                                Column(Modifier.fillMaxWidth().padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text("${timestamp(part.offsetMs + highlight.startMs)} – ${timestamp(part.offsetMs + highlight.endMs)}",
+                                        style = MaterialTheme.typography.titleSmall)
+                                    Text(highlight.reason, color = MaterialTheme.colorScheme.secondary)
+                                }
+                            }
+                        }
+                    } else if (project.parts.all { it.highlights != null }) {
+                        Text("No strong highlight signals found. You can still trim a section manually.")
+                    }
+                    Text("Edit clip", Modifier.bringIntoViewRequester(editorAnchor),
+                        style = MaterialTheme.typography.titleLarge)
+                    LaunchedEffect(momentSelection) {
+                        if (momentSelection > 0 && chosenMoment >= 0) editorAnchor.bringIntoView()
+                    }
+                    key(selected.part.uri) {
+                        ClipEditor(selected.part, project.layout, state, chosenMoment, chosenEnd, momentSelection,
+                            ::showNotificationPermission)
+                    }
                 }
                 if (state.queue.isNotEmpty()) {
                     HorizontalDivider()
