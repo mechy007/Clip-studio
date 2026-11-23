@@ -84,23 +84,23 @@ private enum class EditorTool(val label: String) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun ClipEditor(
-    part: SourcePart, project: StudioProject, state: StudioState, suggestedStart: Long, suggestedEnd: Long,
-    momentSelection: Int, exportRequest: Int, notify: () -> Unit
+    part: SourcePart, project: StudioProject, state: StudioState, draftId: String, suggestedStart: Long, suggestedEnd: Long,
+    momentSelection: Int, exportRequest: Int, notify: () -> Unit, onBookmarkDraft: (Long) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val suggested = suggestedStart in 0 until suggestedEnd && suggestedEnd <= part.durationMs
-    val savedDraft = remember { project.drafts[part.uri] }
+    val savedDraft = remember { project.drafts[draftId] }
     val savedEdit = savedDraft?.edit
-    var layout by rememberSaveable { mutableStateOf(savedEdit?.layout ?: project.layout) }
+    var layout by rememberSaveable { mutableStateOf(savedEdit?.layout ?: project.framing?.layout ?: project.layout) }
     fun selectLayout(value: Layout) {
         layout = value
         StudioSession.changeLayout(value)
     }
     var start by rememberSaveable { mutableStateOf(if (suggested) suggestedStart else savedEdit?.start ?: 0L) }
     var end by rememberSaveable { mutableStateOf(if (suggested) suggestedEnd else savedEdit?.end ?: minOf(30_000L, part.durationMs)) }
-    var camera by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(savedEdit?.camera ?: CameraDefault) }
-    var gameplay by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(savedEdit?.gameplay ?: GameplayDefault) }
+    var camera by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(savedEdit?.camera ?: project.framing?.camera ?: CameraDefault) }
+    var gameplay by rememberSaveable(stateSaver = CropSaver) { mutableStateOf(savedEdit?.gameplay ?: project.framing?.gameplay ?: GameplayDefault) }
     var width by rememberSaveable { mutableStateOf(savedEdit?.width ?: 1080) }
     var mute by rememberSaveable { mutableStateOf(savedEdit?.muted ?: false) }
     var lockCamera by rememberSaveable { mutableStateOf(false) }
@@ -109,6 +109,7 @@ internal fun ClipEditor(
     var live by rememberSaveable { mutableStateOf(false) }
     var fast by rememberSaveable { mutableStateOf(savedEdit?.fastExport ?: true) }
     var enhanceFacecam by rememberSaveable { mutableStateOf(savedEdit?.enhanceFacecam ?: false) }
+    var enhancement by rememberSaveable { mutableStateOf(savedEdit?.enhancement ?: VideoEnhancement.OFF) }
     var highDetail by rememberSaveable { mutableStateOf(savedEdit?.highDetail ?: false) }
     var originalSize by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var sourceSize by remember { mutableStateOf(0 to 0) }
@@ -136,6 +137,15 @@ internal fun ClipEditor(
     var streamerTrack by rememberSaveable { mutableStateOf(savedDraft?.audioTrack ?: 0) }
     var captionEnabled by rememberSaveable { mutableStateOf(savedDraft?.captionEnabled ?: true) }
     var editCaptions by rememberSaveable { mutableStateOf(false) }
+    val overlaySaver = remember { listSaver<List<CaptionCue>, Any>(
+        save = { values -> values.flatMap { listOf(it.startMs, it.endMs, it.text) } },
+        restore = { values -> values.chunked(3).map { CaptionCue(it[0] as Long, it[1] as Long, it[2] as String) } }
+    ) }
+    var overlays by rememberSaveable(stateSaver = overlaySaver) { mutableStateOf(savedDraft?.overlays.orEmpty()) }
+    var captionEditorIndex by remember { mutableStateOf<Int?>(null) }
+    var editingOverlay by remember { mutableStateOf(false) }
+    var exactTrim by rememberSaveable { mutableStateOf(false) }
+    var steppingFrame by remember { mutableStateOf(false) }
     var languageIndex by rememberSaveable {
         mutableStateOf(Languages.indexOfFirst { it.second == savedDraft?.language }.coerceAtLeast(0))
     }
@@ -187,7 +197,7 @@ internal fun ClipEditor(
         }
     }
     LaunchedEffect(part.uri) {
-        savedDraft?.transcript?.let { StudioSession.restoreDraftTranscript(project.id, it) }
+        savedDraft?.transcript?.let { StudioSession.restoreDraftTranscript(project.id, draftId, it) }
         audioTracks = withContext(Dispatchers.IO) { StudioMedia.audioTrackCount(context, part.uri) }
         waveform = try {
             StudioMedia.waveform(context, part)
@@ -196,38 +206,40 @@ internal fun ClipEditor(
     }
     val trackCount = audioTracks ?: 0
     val language = Languages[languageIndex].second
-    val captionMemo = state.transcripts[part.uri] ?: savedDraft?.transcript
+    val captionMemo = state.transcripts[draftId] ?: savedDraft?.transcript
     val transcript = captionMemo?.takeIf {
         it.audioTrack == streamerTrack && it.language == language
     }?.words.orEmpty()
-    val activeCues = remember(transcript, start, end, customCaptions, customText) {
-        when {
+    val activeCues = remember(transcript, start, end, customCaptions, customText, overlays) {
+        val baseCues = when {
             customCaptions -> CaptionTrack.custom(customText, end - start)
             end > start -> CaptionTrack.fromTranscript(transcript, start, end, 36)
             else -> emptyList()
         }
+        overlayCaptions(baseCues, overlays, start, end)
     }
     fun audioOptions() = AudioFinish(normalize, fades, mix && trackCount >= 2, voiceLevel, gameLevel)
     fun clip() = ExportClip(
         part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(),
         preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail, enhanceFacecam = layout == Layout.Split && enhanceFacecam,
-        captionPosition = captionPosition, captionSize = captionSize
+        captionPosition = captionPosition, captionSize = captionSize, enhancement = enhancement
     )
     val draft = ClipDraft(
         clip().copy(captions = emptyList(), audio = AudioFinish(normalize, fades, mix, voiceLevel, gameLevel),
             enhanceFacecam = enhanceFacecam),
-        captionEnabled, customCaptions, customText, streamerTrack, language, captionMemo
+        captionEnabled, customCaptions, customText, streamerTrack, language, captionMemo, overlays
     )
     val initialDraft = remember { draft }
     val latestDraft by rememberUpdatedState(draft)
-    val saveOnExit by rememberUpdatedState(suggested || draft != initialDraft)
+    val shouldCreate = suggested || draftId != part.uri.toString() || draft != initialDraft
+    val saveOnExit by rememberUpdatedState(shouldCreate)
     LaunchedEffect(draft) {
         delay(350)
-        StudioSession.saveDraft(project.id, draft, suggested || draft != initialDraft)
+        StudioSession.saveDraft(project.id, draftId, draft, shouldCreate)
     }
     DisposableEffect(project.id, part.uri) {
         onDispose {
-            StudioSession.saveDraft(project.id, latestDraft, saveOnExit)
+            StudioSession.saveDraft(project.id, draftId, latestDraft, saveOnExit)
         }
     }
     val generatingCaptions = Work.CAPTIONS in state.jobs
@@ -367,7 +379,7 @@ internal fun ClipEditor(
                 Text("Trim clip", style = MaterialTheme.typography.titleMedium)
                 Text("${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}",
                     style = MaterialTheme.typography.bodyMedium)
-                if (state.persistedDrafts[project.id]?.get(part.uri) == draft) {
+                if (state.persistedDrafts[project.id]?.get(draftId) == draft) {
                     Text("Draft saved", style = MaterialTheme.typography.labelSmall)
                 }
                 RangeSlider(
@@ -395,9 +407,44 @@ internal fun ClipEditor(
                         frameAt = start
                     })
                 }
+                OutlinedButton(enabled = !busy, onClick = { exactTrim = true }) { Text("Enter trim times") }
+                if (exactTrim) TimeRangeDialog("Trim times", start, end, part.durationMs,
+                    onDismiss = { exactTrim = false }) { from, to, _ ->
+                    start = from
+                    end = to
+                    frameAt = from
+                    live = false
+                    playing = false
+                    showPreview = false
+                    exactTrim = false
+                }
                 SettingsDisclosure("Playhead controls", preciseTrim, { preciseTrim = !preciseTrim }) {
                     var scrub by remember(frameAt) { mutableStateOf(frameAt.toFloat()) }
-                    Text("Playhead · ${timestamp(part.offsetMs + scrub.toLong())}", style = MaterialTheme.typography.bodySmall)
+                    Text("Playhead · ${editTime(part.offsetMs + scrub.toLong())}", style = MaterialTheme.typography.bodySmall)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(false, true).forEach { forward ->
+                            OutlinedButton(enabled = !steppingFrame, onClick = {
+                                val at = frameAt
+                                steppingFrame = true
+                                scope.launch {
+                                    try {
+                                        val nearby = StudioFraming.neighboringFrame(context, part.uri, at, forward)
+                                        if (nearby != null && frameAt == at) {
+                                            playing = false
+                                            live = false
+                                            showPreview = false
+                                            frameAt = nearby.coerceIn(0, part.durationMs - 1)
+                                        }
+                                    } finally { steppingFrame = false }
+                                }
+                            }) { Text(if (forward) "Next frame" else "Previous frame") }
+                        }
+                    }
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(enabled = !busy && frameAt < end, onClick = { start = frameAt }) { Text("Set start") }
+                        TextButton(enabled = !busy && frameAt > start, onClick = { end = frameAt }) { Text("Set end") }
+                        TextButton(onClick = { StudioSession.setBookmark(project.id, part, frameAt, true) }) { Text("Bookmark") }
+                    }
                     Slider(scrub, { scrub = it }, valueRange = 0f..part.durationMs.toFloat(), onValueChangeFinished = {
                         playing = false
                         showPreview = false
@@ -405,10 +452,38 @@ internal fun ClipEditor(
                         frameAt = scrub.toLong().coerceAtMost(part.durationMs - 1)
                     })
                 }
+                val bookmarks = project.bookmarks[part.uri].orEmpty()
+                if (bookmarks.isNotEmpty()) {
+                    var showBookmarks by rememberSaveable { mutableStateOf(false) }
+                    SettingsDisclosure("Bookmarks · ${bookmarks.size}", showBookmarks, { showBookmarks = !showBookmarks }) {
+                        bookmarks.forEach { at ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(onClick = {
+                                    playing = false
+                                    live = false
+                                    showPreview = false
+                                    frameAt = at
+                                }) { Text(editTime(part.offsetMs + at)) }
+                                TextButton(enabled = !busy, onClick = { onBookmarkDraft(at) }) { Text("Make clip") }
+                                TextButton(onClick = { StudioSession.setBookmark(project.id, part, at, false) }) { Text("Remove") }
+                            }
+                        }
+                    }
+                }
             }
             EditorTool.Layout, EditorTool.Crop -> {
                 Text("Output layout", style = MaterialTheme.typography.titleMedium)
                 LayoutPicker(layout, !busy, ::selectLayout)
+                TextButton(onClick = {
+                    StudioSession.saveFraming(project.id, ProjectFraming(layout, camera, gameplay))
+                }) { Text("Reuse framing in new drafts") }
+                project.framing?.let { saved ->
+                    TextButton(onClick = {
+                        selectLayout(saved.layout)
+                        if (!lockCamera) camera = saved.camera
+                        if (!lockGame) gameplay = saved.gameplay
+                    }) { Text("Apply saved framing") }
+                }
                 SettingsDisclosure("Creator presets", showingPresets, { showingPresets = !showingPresets }) {
                     state.library.presets.forEach { saved ->
                         OutlinedButton(onClick = {
@@ -549,8 +624,8 @@ internal fun ClipEditor(
                     trackMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(enabled = canCaption && streamerTrack in 0 until trackCount, onClick = {
-                            StudioSession.saveDraft(project.id, draft, create = true)
-                            StudioSession.captions(context, part, start, end, language, streamerTrack)
+                            StudioSession.saveDraft(project.id, draftId, draft, create = true)
+                            StudioSession.captions(context, draftId, part, start, end, language, streamerTrack)
                             notify()
                         }) { Text("Generate captions") }
                         TextButton(enabled = !generatingCaptions,
@@ -597,11 +672,61 @@ internal fun ClipEditor(
                             }
                         }
                     }
-                    if (!customCaptions && editCaptions) transcript.forEachIndexed { index, row ->
-                        OutlinedTextField(
-                            value = row.text, onValueChange = { StudioSession.editTranscript(part.uri, index, it) },
-                            label = { Text(timestamp(part.offsetMs + row.startMs)) }, modifier = Modifier.fillMaxWidth()
-                        )
+                }
+                if (editCaptions && !customCaptions) {
+                    transcript.forEachIndexed { index, row ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("${editTime(row.startMs)}–${editTime(row.endMs)} · ${row.text}",
+                                modifier = Modifier.weight(1f), maxLines = 2)
+                            TextButton(onClick = {
+                                editingOverlay = false
+                                captionEditorIndex = index
+                            }) { Text("Edit") }
+                            TextButton(enabled = frameAt > row.startMs && frameAt < row.endMs, onClick = {
+                                StudioSession.updateTranscript(draftId, index) { splitTranscript(it, frameAt) }
+                            }) { Text("Split") }
+                        }
+                    }
+                }
+                var manualOpen by rememberSaveable { mutableStateOf(false) }
+                SettingsDisclosure("Timed custom captions · ${overlays.size}", manualOpen, { manualOpen = !manualOpen }) {
+                    overlays.forEachIndexed { index, cue ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("${editTime(cue.startMs)}–${editTime(cue.endMs)} · ${cue.text}",
+                                modifier = Modifier.weight(1f), maxLines = 2)
+                            TextButton(onClick = {
+                                editingOverlay = true
+                                captionEditorIndex = index
+                            }) { Text("Edit") }
+                            TextButton(onClick = { overlays = overlays.filterIndexed { position, _ -> position != index } }) {
+                                Text("Remove")
+                            }
+                        }
+                    }
+                    OutlinedButton(enabled = end > start, onClick = {
+                        editingOverlay = true
+                        captionEditorIndex = overlays.size
+                    }) { Text("Add timed caption") }
+                }
+                val captionIndex = captionEditorIndex
+                if (captionIndex != null) {
+                    val original = if (editingOverlay) overlays.getOrNull(captionIndex)
+                        else transcript.getOrNull(captionIndex)?.let { CaptionCue(it.startMs, it.endMs, it.text, it.words) }
+                    val first = original?.startMs ?: frameAt.coerceIn(start, (end - 1).coerceAtLeast(start))
+                    val last = original?.endMs ?: minOf(end, first + 2_000)
+                    TimeRangeDialog("Caption timing", first, last, part.durationMs,
+                        onDismiss = { captionEditorIndex = null }, captionText = original?.text.orEmpty()) { from, to, value ->
+                        val text = requireNotNull(value)
+                        if (editingOverlay) {
+                            val cue = CaptionCue(from, to, text)
+                            overlays = overlays.toMutableList().apply {
+                                if (captionIndex in indices) set(captionIndex, cue) else add(cue)
+                            }.sortedBy { it.startMs }
+                        } else StudioSession.updateTranscript(draftId, captionIndex) { row ->
+                            val timing = row.words.takeIf { text == row.text && from == row.startMs && to == row.endMs }.orEmpty()
+                            listOf(TranscriptSegment(from, to, text, timing))
+                        }
+                        captionEditorIndex = null
                     }
                 }
                 val latestCues by rememberUpdatedState(activeCues)
@@ -673,6 +798,13 @@ internal fun ClipEditor(
                 SettingsDisclosure("More export settings", exportOptions, { exportOptions = !exportOptions }) {
                     FilterChip(selected = fast, onClick = { fast = !fast }, label = { Text("Fast Export") })
                     if (fast) Text("Tries hardware H.264 at the selected resolution", style = MaterialTheme.typography.bodySmall)
+                    Text("Video enhancement", style = MaterialTheme.typography.titleSmall)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        VideoEnhancement.entries.forEach { option ->
+                            FilterChip(selected = enhancement == option, onClick = { enhancement = option },
+                                label = { Text(option.label) })
+                        }
+                    }
                     FilterChip(selected = highDetail, onClick = { highDetail = !highDetail }, label = { Text("High detail") })
                     if (highDetail) Text("Higher bitrate preserves more detail and makes larger MP4 files.",
                         style = MaterialTheme.typography.bodySmall)

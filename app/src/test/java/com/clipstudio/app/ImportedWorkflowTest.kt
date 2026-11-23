@@ -6,6 +6,38 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImportedWorkflowTest {
+    @Test fun preciseTimesUseMillisecondsAndValidateTheFraction() {
+        assertEquals(5_040_125L, parseEditTime("1:24:00.125"))
+        assertEquals(400L, parseEditTime("0:00.4"))
+        assertEquals("84:00.125", editTime(5_040_125))
+        assertEquals(null, parseEditTime("1:60.200"))
+        assertEquals(null, parseEditTime("0:01.1234"))
+    }
+
+    @Test fun timedCaptionOverridesOnlyTheOverlappingInterval() {
+        val timed = overlayCaptions(listOf(CaptionCue(0, 4_000, "Base")),
+            listOf(CaptionCue(1_500, 2_500, "Overlay")), 500, 4_500)
+        assertEquals(listOf(CaptionCue(0, 1_000, "Base"), CaptionCue(1_000, 2_000, "Overlay"),
+            CaptionCue(2_000, 4_000, "Base")), timed)
+    }
+
+    @Test fun captionSplitSnapsToTheNearestTimedWord() {
+        val row = TranscriptSegment(100, 700, "first second",
+            listOf(TimedWord(100, 380, "first"), TimedWord(400, 700, "second")))
+        val result = splitTranscript(row, 370)
+        assertEquals(listOf("first", "second"), result.map { it.text })
+        assertEquals(400L, result.first().endMs)
+        assertEquals(400L, result.last().startMs)
+    }
+
+    @Test fun enhancedScalingAppliesToGameplayAndFitLayouts() {
+        val crop = Crop(.5f, .5f)
+        assertTrue(videoFilter(Layout.Split, crop, crop, qualityScale = true)
+            .contains("scale=1080:960:flags=lanczos,setsar=1[bottom]"))
+        assertTrue(videoFilter(Layout.Fit, crop, crop, qualityScale = true)
+            .contains("force_divisible_by=2:flags=lanczos"))
+    }
+
     @Test fun parsesOptionalRecordingTimestampsWithoutOverflow() {
         assertEquals(0L, recordingStartMs(""))
         assertEquals(5_040_000L, recordingStartMs("1:24:00"))
