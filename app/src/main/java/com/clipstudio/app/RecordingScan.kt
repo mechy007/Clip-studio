@@ -17,11 +17,14 @@ internal fun recordingSampleRanges(part: RecordingPartWindow): List<RecordingPar
 internal fun scoreRecordingScan(
     parts: List<RecordingPartWindow>, samples: List<List<AudioEnergyWindow>>
 ): List<RecordingScanPart> {
-    val reference = AudioSignalScorer.reference(samples.flatten())
+    // A percentile can pick the quietest sample when only a few were available.
+    val measuredWindows = samples.flatten()
+    val peakRms = measuredWindows.maxOfOrNull { it.rms } ?: 0f
+    val peakAmplitude = measuredWindows.maxOfOrNull { it.peak } ?: 0f
     return parts.zip(samples).map { (part, measured) ->
-        val score = reference?.takeIf { measured.isNotEmpty() }?.let {
-            AudioSignalScorer.score(part.startMs, part.endMs, measured, it.rms, it.peak)
-        }
+        val score = if (measured.isNotEmpty() && peakRms > 0f && peakAmplitude > 0f) {
+            AudioSignalScorer.score(part.startMs, part.endMs, measured, peakRms, peakAmplitude)
+        } else null
         RecordingScanPart(part, score, measured.size)
     }
 }
