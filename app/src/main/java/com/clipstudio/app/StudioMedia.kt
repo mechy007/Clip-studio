@@ -3,6 +3,8 @@ package com.clipstudio.app
 import android.content.ContentValues
 import android.content.Context
 import android.media.MediaMetadataRetriever
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import android.provider.MediaStore
 import com.arthenica.ffmpegkit.FFmpegKit
@@ -13,6 +15,8 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.CancellationException
@@ -23,8 +27,18 @@ import java.io.File
 import java.net.URI
 import java.util.Locale
 import java.util.UUID
+import org.json.JSONObject
 
-internal data class SourcePart(val uri: Uri, val offsetMs: Long, val durationMs: Long)
+internal data class SourcePart(
+    val uri: Uri, val offsetMs: Long, val durationMs: Long,
+    val nextOffsetMs: Long = offsetMs + durationMs, val formatId: String? = null, val joined: Boolean = false
+)
+
+internal data class AudioFinish(
+    val normalize: Boolean = false, val fade: Boolean = false,
+    val mixTracks: Boolean = false, val voice: Float = 1f, val game: Float = .6f
+)
+
 
 internal object StudioMedia {
     suspend fun duration(context: Context, source: Uri): Long = withContext(Dispatchers.IO) {
@@ -42,98 +56,215 @@ internal object StudioMedia {
     suspend fun downloadInParts(
         context: Context,
         link: String,
+        resumeAtMs: Long = 0,
+        formatId: String? = null,
         onPart: suspend (SourcePart) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
         val videoId = YouTubeLinkClassifier.parseVideoId(link)
-        val source = runInterruptible {
+        val media = runInterruptible {
             YouTubeVideoImporter.prepare(context)
+            val format = formatId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) }
+                ?: "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
             val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
                 .addOption("--no-playlist")
                 .addOption("--match-filter", "!is_live & !is_upcoming")
                 .addOption("--socket-timeout", 20)
-                .addOption("-f", "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]")
-                .addOption("--get-url")
-            YoutubeDL.execute(request).out.lineSequence()
-                .map(String::trim).filter(String::isNotEmpty).singleOrNull()
+                .addOption("-f", format)
+                .addOption("--print", """{"url":%(url)j,"format":%(format_id)j,"duration":%(duration)j}""")
+            YoutubeDL.execute(request).out.lineSequence().map(String::trim).firstOrNull { it.startsWith("{") }
+                ?.let(::JSONObject)
         } ?: return@withContext false
+        val source = media.getString("url")
+        val selectedFormat = media.getString("format")
+        val expectedEnd = media.optDouble("duration", 0.0).let { if (it.isFinite()) (it * 1000).toLong() else 0L }
         val remote = runCatching { URI(source) }.getOrNull()
         if (remote?.scheme != "https" || remote.host == null) return@withContext false
+        if (formatId != null && selectedFormat != formatId) return@withContext false
+        if (expectedEnd > 0 && resumeAtMs >= expectedEnd - 300) return@withContext true
 
         val dir = File(context.filesDir, "imports/parts-${UUID.randomUUID()}")
         check(dir.mkdirs()) { "Could not create download storage." }
         val list = File(dir, "segments.csv")
-        var count = 0
-        suspend fun publishReady() {
+        val published = mutableSetOf<String>()
+        var latestEnd = resumeAtMs
+        suspend fun publishReady(includeTail: Boolean = false) {
             val csv = if (list.isFile) list.readText() else ""
-            for (row in csv.substringBeforeLast('\n', "").lineSequence().drop(count)) {
-                val entry = parseSegmentRow(row) ?: break
+            val rows = csv.substringBeforeLast('\n', "").lineSequence().mapNotNull(::parseSegmentRow).toList()
+            for ((index, entry) in rows.withIndex().drop(published.size)) {
+                val tail = index == rows.lastIndex
+                if (tail && !includeTail && entry.endMs - entry.startMs < 40_000L) break
                 val file = File(dir, entry.name)
                 if (!YouTubeDownloadValidation.isValidMp4(file)) break
                 val uri = Uri.fromFile(file)
-                onPart(SourcePart(uri, entry.startMs, duration(context, uri)))
-                count++
+                if (entry.startMs + resumeAtMs < latestEnd - 750) break
+                val offset = entry.startMs + resumeAtMs
+                val end = entry.endMs + resumeAtMs
+                val part = SourcePart(uri, offset, duration(context, uri), end, selectedFormat)
+                currentCoroutineContext().ensureActive()
+                withContext(NonCancellable) {
+                    onPart(part)
+                    latestEnd = end
+                    published += entry.name
+                }
             }
         }
         try {
             val complete = coroutineScope {
                 val transfer = async {
-                    runFfmpeg(arrayOf(
-                        "-nostdin", "-loglevel", "error", "-rw_timeout", "20000000",
-                        "-i", source, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
-                        "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
+                    val seek = if (resumeAtMs == 0L) emptyList() else listOf("-ss", seconds(resumeAtMs))
+                    // Stream-copy the initial import. A restarted import needs an accurate seek
+                    // that decodes and discards preceding GOP frames before producing new parts.
+                    val codec = if (resumeAtMs == 0L) listOf("-c", "copy") else listOf(
+                        "-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k",
+                        "-force_key_frames", "expr:gte(t,n_forced*40)", "-c:a", "aac", "-b:a", "128k"
+                    )
+                    val arguments = listOf("-nostdin", "-loglevel", "error", "-rw_timeout", "20000000") + seek +
+                        listOf("-i", source, "-map", "0:v:0", "-map", "0:a:0") + codec + listOf(
+                        "-avoid_negative_ts", "disabled", "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
                         "-segment_format_options", "movflags=+faststart",
                         "-segment_list", list.absolutePath, "-segment_list_type", "csv",
                         File(dir, "part-%05d.mp4").absolutePath
-                    ))
+                    )
+                    runFfmpeg(arguments.toTypedArray())
                 }
                 while (!transfer.isCompleted) {
                     publishReady()
                     delay(400)
                 }
                 val success = transfer.await()
-                publishReady()
-                success
+                val last = if (list.isFile) list.readLines().lastOrNull()?.let(::parseSegmentRow) else null
+                val finished = success && (expectedEnd == 0L || last != null && resumeAtMs + last.endMs >= expectedEnd - 1800)
+                publishReady(includeTail = finished)
+                finished && last != null && latestEnd >= resumeAtMs + last.endMs
             }
-            check(complete || count == 0) { "Download stopped. Complete sections are still available." }
-            complete && count > 0
+            check(complete || published.isEmpty() && resumeAtMs == 0L) {
+                "Download interrupted. Use Resume download to keep the completed sections."
+            }
+            complete && published.isNotEmpty()
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) { runCatching { publishReady() } }
+            throw cancelled
         } finally {
-            if (count == 0) dir.deleteRecursively()
+            if (published.isEmpty()) dir.deleteRecursively()
+            else dir.listFiles().orEmpty().filter { it.name !in published }.forEach { it.delete() }
         }
     }
 
-    suspend fun export(
-        context: Context, part: SourcePart, startMs: Long, endMs: Long,
-        layout: Layout, camera: Crop, gameplay: Crop,
-        width: Int = 1080, muted: Boolean = false, captions: List<CaptionCue> = emptyList(),
-        preset: CaptionPreset = CaptionPreset.KARAOKE
-    ): Uri = withContext(Dispatchers.IO) {
+    suspend fun join(context: Context, sections: List<SourcePart>): SourcePart = withContext(Dispatchers.IO) {
+        require(sections.size == 2 && sections.all { it.uri.scheme == "file" && !it.joined })
+        val first = sections.first()
+        val next = sections.last()
+        require(adjacent(first, next)) { "These sections have a gap." }
+        val dir = File(context.filesDir, "imports").apply { mkdirs() }
+        val result = File.createTempFile("studio-joined-", ".mp4", dir)
+        var complete = false
+        try {
+            // Decode each file separately so initial copied parts and accurately
+            // resumed parts can be joined even when their encoder settings differ.
+            val a = seconds(first.nextOffsetMs - first.offsetMs)
+            val b = seconds(next.nextOffsetMs - next.offsetMs)
+            val filter = "[0:v:0]trim=duration=$a,setpts=PTS-STARTPTS,setsar=1,fps=30[v0];" +
+                "[1:v:0]trim=duration=$b,setpts=PTS-STARTPTS,setsar=1,fps=30[v1];" +
+                "[0:a:0]aresample=48000,apad,atrim=duration=$a,asetpts=PTS-STARTPTS[a0];" +
+                "[1:a:0]aresample=48000,apad,atrim=duration=$b,asetpts=PTS-STARTPTS[a1];" +
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"
+            check(runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-y",
+                "-i", input(context, first.uri), "-i", input(context, next.uri),
+                "-filter_complex_threads", "2", "-filter_complex", filter, "-map", "[v]", "-map", "[a]",
+                "-threads", "2", "-c:v", "libopenh264", "-b:v", "6500k", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+                result.absolutePath)) && YouTubeDownloadValidation.isValidMp4(result)) { "Could not join these sections." }
+            val part = SourcePart(Uri.fromFile(result), first.offsetMs, duration(context, Uri.fromFile(result)),
+                next.nextOffsetMs, first.formatId, joined = true)
+            complete = true
+            part
+        } finally {
+            if (!complete) result.delete()
+        }
+    }
+
+    suspend fun export(context: Context, clip: ExportClip, record: suspend (Uri) -> Unit) =
+        withContext(Dispatchers.IO) {
+            val output = render(context, clip, preview = false)
+            try {
+                currentCoroutineContext().ensureActive()
+                withContext(NonCancellable) { record(saveToGallery(context, output)) }
+            } finally { output.delete() }
+        }
+
+    suspend fun preview(context: Context, clip: ExportClip): Uri =
+        Uri.fromFile(render(context, clip, preview = true))
+
+    private suspend fun render(context: Context, clip: ExportClip, preview: Boolean): File = withContext(Dispatchers.IO) {
+        val (part, startMs, endMs, layout, camera, gameplay) = clip
         require(startMs in 0 until endMs && endMs <= part.durationMs)
-        val output = File.createTempFile("studio-export-", ".mp4", context.cacheDir)
+        val width = if (preview) 540 else clip.width
+        val captions = clip.captions
+        val output = File.createTempFile(if (preview) "studio-preview-" else "studio-export-", ".mp4", context.cacheDir)
         val subtitle = if (captions.isEmpty()) null else File.createTempFile("studio-captions-", ".ass", context.cacheDir)
+        var done = false
         try {
             val (frameWidth, frameHeight) = layout.dimensions(width)
-            val filter = videoFilter(layout, camera, gameplay, width)
+            val filter = videoFilter(layout, camera, gameplay, width, clip.facePath)
             val renderFilter = if (subtitle == null) filter else {
-                subtitle.writeText(AssKaraokeTrack.render(captions, preset, frameWidth, frameHeight))
+                subtitle.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight))
                 "$filter;[out]subtitles=filename='${subtitle.absolutePath}':fontsdir=/system/fonts[captioned]"
             }
             val video = if (subtitle == null) "[out]" else "[captioned]"
-            val audio = if (muted) listOf("-an") else listOf("-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k")
+            val tracks = if (clip.muted) 0 else audioTrackCount(context, part.uri)
+            val audioFilter = audioFinishFilter(clip.audio, tracks, endMs - startMs)
+            val audio = when {
+                tracks == 0 -> listOf("-an")
+                audioFilter != null -> listOf("-map", "[finishedAudio]", "-c:a", "aac", "-b:a", "128k")
+                else -> listOf("-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k")
+            }
+            val graph = if (audioFilter == null) renderFilter else "$renderFilter;$audioFilter"
             val arguments = listOf(
                 "-nostdin", "-loglevel", "error", "-y", "-ss", seconds(startMs),
                 "-i", input(context, part.uri), "-t", seconds(endMs - startMs),
-                "-filter_complex_threads", "2", "-filter_complex", renderFilter, "-map", video,
+                "-filter_complex_threads", "2", "-filter_complex", graph, "-map", video,
                 "-r", "30", "-threads", "2", "-c:v", "libopenh264",
-                "-b:v", if (width == 1080) "4500k" else "2800k", "-pix_fmt", "yuv420p"
+                "-b:v", if (width == 1080) "4500k" else "2600k", "-pix_fmt", "yuv420p"
             ) + audio + listOf("-movflags", "+faststart", output.absolutePath)
             check(runFfmpeg(arguments.toTypedArray()) && YouTubeDownloadValidation.isValidMp4(output)) {
                 "Could not render this clip."
             }
-            saveToGallery(context, output)
+            done = true
+            output
         } finally {
-            output.delete()
+            if (!done) output.delete()
             subtitle?.delete()
         }
+    }
+
+    internal fun audioTrackCount(context: Context, uri: Uri): Int {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(context, uri, null)
+            (0 until extractor.trackCount).count {
+                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+            }
+        } catch (_: Exception) {
+            // The renderer retains optional audio mapping for unknown containers.
+            -1
+        } finally { extractor.release() }
+    }
+
+    suspend fun waveform(context: Context, part: SourcePart): List<Float> = withContext(Dispatchers.IO) {
+        val data = File.createTempFile("studio-wave-", ".txt", context.cacheDir)
+        try {
+            val samples = (part.durationMs * 16L / 150L).coerceIn(160L, Int.MAX_VALUE.toLong())
+            val filter = "asetnsamples=n=$samples:p=0,astats=metadata=1:reset=1:" +
+                "measure_perchannel=none:measure_overall=Peak_level," +
+                "ametadata=print:key=lavfi.astats.Overall.Peak_level:file=${data.absolutePath}"
+            val success = runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-i", input(context, part.uri),
+                "-map", "0:a:0", "-vn", "-ar", "16000", "-af", "aformat=channel_layouts=mono,aresample=16000,asetpts=N/SR/TB,$filter", "-f", "null", "-"))
+            if (!success) emptyList() else data.useLines { lines ->
+                lines.filter { it.startsWith("lavfi.astats.Overall.Peak_level=") }.take(160).map { row ->
+                    val db = row.substringAfter('=').toFloatOrNull() ?: -60f
+                    ((db + 60f) / 60f).coerceIn(0f, 1f)
+                }.toList()
+            }
+        } finally { data.delete() }
     }
 
     internal fun input(context: Context, uri: Uri): String =
@@ -143,7 +274,7 @@ internal object StudioMedia {
         runFfmpeg(arrayOf(
             "-nostdin", "-loglevel", "error", "-y", "-ss", seconds(startMs),
             "-i", input(context, part.uri), "-t", seconds(endMs - startMs), "-map", "0:a:0",
-            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_f32be", "-f", "f32be", file.absolutePath
+            "-vn", "-ar", "16000", "-af", "aformat=channel_layouts=mono", "-c:a", "pcm_f32be", "-f", "f32be", file.absolutePath
         ))
 
     private fun saveToGallery(context: Context, file: File): Uri {

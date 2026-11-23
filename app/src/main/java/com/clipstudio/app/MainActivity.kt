@@ -104,6 +104,13 @@ class MainActivity : ComponentActivity() {
             }
         }
         val occupied = state.jobs.isNotEmpty()
+        var projectsOpen by rememberSaveable { mutableStateOf(false) }
+        LaunchedEffect(state.joinRevision) {
+            state.joined?.let {
+                selectedPart = it.uri.toString()
+                chosenMoment = -1L
+            }
+        }
         val exporting = Work.EXPORT in state.jobs
         val selected = project?.parts?.find { it.part.uri.toString() == selectedPart }
             ?: project?.parts?.firstOrNull()
@@ -115,6 +122,20 @@ class MainActivity : ComponentActivity() {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Image(painterResource(R.drawable.studio_mark), null, Modifier.size(52.dp))
                     Text("Clip Studio", style = MaterialTheme.typography.headlineMedium)
+                }
+                if (state.library.projects.isNotEmpty()) {
+                    OutlinedButton(onClick = { projectsOpen = !projectsOpen }) {
+                        Text(if (projectsOpen) "Hide projects" else "Projects · ${state.library.projects.size}")
+                    }
+                    if (projectsOpen) state.library.projects.forEach { item ->
+                        FilterChip(selected = project?.id == item.id, enabled = !occupied, onClick = {
+                            selectedPart = null
+                            chosenMoment = -1L
+                            incomingLayout = item.layout
+                            StudioSession.openProject(item.id)
+                            projectsOpen = false
+                        }, label = { Text("${item.name} · ${item.exports.size} exports") })
+                    }
                 }
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -148,7 +169,14 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                state.storageWarning?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (state.status.isNotBlank()) Text(state.status, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (project?.youtubeLink != null && !project.importComplete && Work.IMPORT !in state.jobs) {
+                    OutlinedButton(onClick = {
+                        StudioSession.resume(this@MainActivity)
+                        showNotificationPermission()
+                    }) { Text("Resume download") }
+                }
                 if (project != null && selected != null) {
                     Text(project.name, style = MaterialTheme.typography.titleLarge)
                     if (project.parts.size > 1) {
@@ -170,6 +198,25 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     LayoutPicker(project.layout, !exporting, StudioSession::changeLayout)
+                    val next = project.parts.map { it.part }.firstOrNull { adjacent(selected.part, it) }
+                    if (next != null) {
+                        OutlinedButton(enabled = Work.JOIN !in state.jobs, onClick = {
+                            StudioSession.join(this@MainActivity, selected.part, next)
+                            showNotificationPermission()
+                        }) { Text("Edit across next section") }
+                    }
+                    Text("Highlight focus", style = MaterialTheme.typography.titleSmall)
+                    HighlightMode.entries.chunked(2).forEach { row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            row.forEach { mode ->
+                                FilterChip(selected = project.mode == mode, enabled = Work.ANALYZE !in state.jobs,
+                                    onClick = {
+                                        StudioSession.setMode(this@MainActivity, mode)
+                                        showNotificationPermission()
+                                    }, label = { Text(mode.label) })
+                            }
+                        }
+                    }
                     if (project.parts.any { it.highlights == null } && Work.ANALYZE !in state.jobs) {
                         OutlinedButton(onClick = { StudioSession.analyze(this@MainActivity) }) { Text("Find highlights") }
                     }

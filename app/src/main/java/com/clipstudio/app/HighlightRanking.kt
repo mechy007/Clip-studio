@@ -1,5 +1,9 @@
 package com.clipstudio.app
 
+internal enum class HighlightMode(val label: String) {
+    BALANCED("Balanced"), FUNNY("Funny reactions"), GAMEPLAY("Gameplay action"), TALKING("Talking highlights")
+}
+
 internal data class VisualSample(val timeMs: Long, val change: Float)
 internal data class Highlight(val startMs: Long, val endMs: Long, val score: Int, val reason: String)
 
@@ -8,10 +12,14 @@ internal fun rankHighlights(
     energy: List<AudioEnergyWindow>,
     reactions: List<AudioEventWindow>,
     visual: List<VisualSample>,
-    targetMs: Long = 24_000
+    targetMs: Long = 24_000,
+    mode: HighlightMode = HighlightMode.BALANCED
 ): List<Highlight> {
     if (durationMs < 2_000L) return emptyList()
     val clipDuration = targetMs.coerceIn(2_000, durationMs)
+    val focus = if (reactions.isEmpty() && mode in listOf(HighlightMode.FUNNY, HighlightMode.TALKING)) {
+        HighlightMode.BALANCED
+    } else mode
     val reference = AudioSignalScorer.reference(energy)
     val typical = energy.map { it.rms }.sorted().let { it.getOrNull(it.size / 2) } ?: 0f
     val motionSamples = visual.map { it.change }.sorted()
@@ -33,11 +41,20 @@ internal fun rankHighlights(
         val reactionStrength = maxOf(laughter, shout, cheer)
         val difference = visualBySecond[second]?.change ?: 0f
         val motion = ((difference - maxOf(0.035f, typicalMotion * 1.12f)) * 4).coerceIn(0f, 1f)
-        val main = maxOf(reactionStrength, loudness * .85f, motion * .9f)
+        val speech = (-2L..2L).map { reactionBySecond[second + it]?.speech ?: 0f }.average().toFloat()
+        val main = when (focus) {
+            HighlightMode.BALANCED -> maxOf(reactionStrength, loudness * .85f, motion * .9f)
+            HighlightMode.FUNNY -> laughter * .85f + shout * .1f + cheer * .05f
+            HighlightMode.GAMEPLAY -> motion * .85f + loudness * .15f
+            HighlightMode.TALKING -> speech * .90f + loudness * .10f
+        }
         if (main < .12f) return@mapNotNull null
         val score = ((main * .72f + (reactionStrength + loudness + motion) * .093f) * 100)
             .toInt().coerceIn(0, 100)
         val reason = when {
+            focus == HighlightMode.TALKING -> "Sustained speech"
+            focus == HighlightMode.GAMEPLAY -> "Sudden visual activity"
+            focus == HighlightMode.FUNNY -> if (laughter >= shout) "Laughter detected" else "Shouting detected"
             reactionStrength >= .24f && reactionStrength == main -> when (reactionStrength) {
                 laughter -> "Laughter detected"
                 shout -> "Shouting detected"
@@ -46,8 +63,32 @@ internal fun rankHighlights(
             motion * .9f >= loudness * .85f -> "Sudden visual activity"
             else -> "Audio spike"
         }
-        val start = (time - clipDuration / 3).coerceIn(0, durationMs - clipDuration)
-        Highlight(start, start + clipDuration, score, reason)
+        val lead = when (focus) {
+            HighlightMode.GAMEPLAY -> clipDuration * 2 / 5
+            HighlightMode.TALKING -> clipDuration / 2
+            else -> clipDuration / 3
+        }
+        val start = (time - lead).coerceIn(0, durationMs - clipDuration)
+        val end = start + clipDuration
+        fun active(at: Long): Boolean {
+            val signal = reactionBySecond[at]
+            val eventStrength = signal?.let { maxOf(it.laughter, it.shouting, it.cheering) } ?: 0f
+            val speaking = (signal?.speech ?: 0f) >= .30f
+            val moving = (visualBySecond[at]?.change ?: 0f) >= maxOf(.20f, typicalMotion * 1.25f)
+            return when (focus) {
+                HighlightMode.FUNNY -> eventStrength >= .24f
+                HighlightMode.GAMEPLAY -> moving
+                HighlightMode.TALKING -> speaking
+                HighlightMode.BALANCED -> eventStrength >= .28f || speaking || moving
+            }
+        }
+        val setup = if (active(start / 1000) && active(start / 1000 - 1)) {
+            (start - 2_000L).coerceAtLeast(0L)
+        } else start
+        val payoff = if (active((end - 1) / 1000) && active(end / 1000)) {
+            (end + 2_000L).coerceAtMost(durationMs)
+        } else end
+        Highlight(setup, payoff, score, reason)
     }
     val selected = mutableListOf<Highlight>()
     for (candidate in candidates.sortedWith(compareByDescending<Highlight> { it.score }.thenBy { it.startMs })) {

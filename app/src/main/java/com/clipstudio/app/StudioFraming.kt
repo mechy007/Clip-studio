@@ -62,4 +62,40 @@ internal object StudioFraming {
             detector.close()
         }
     }
+    suspend fun track(
+        context: Context, part: SourcePart, startMs: Long, endMs: Long, camera: Crop
+    ): List<FacePoint> {
+        val detector = FaceDetection.getClient(FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).setMinFaceSize(.055f).build())
+        val path = mutableListOf(FacePoint(0, camera.x, camera.y))
+        var found = 0
+        try {
+            val step = maxOf(350L, (endMs - startMs) / 18)
+            for (at in startMs until endMs step step) {
+                val bitmap = frame(context, part.uri, at) ?: continue
+                try {
+                    val prior = path.last()
+                    val box = cropWindow(bitmap.width, bitmap.height, 1.125f, camera.copy(x = prior.x, y = prior.y))
+                    val targetX = (box.x + box.width / 2f) / bitmap.width
+                    val targetY = (box.y + box.height / 2f) / bitmap.height
+                    fun distance(face: android.graphics.Rect) =
+                        hypot(face.exactCenterX() / bitmap.width - targetX, face.exactCenterY() / bitmap.height - targetY)
+                    val face = withContext(NonCancellable) {
+                        detector.process(InputImage.fromBitmap(bitmap, 0)).await()
+                    }.map { it.boundingBox }.filter { it.width() <= bitmap.width * .33f }
+                        .minByOrNull(::distance)?.takeIf { distance(it) < .40f } ?: continue
+                    val x = (face.exactCenterX() - box.width / 2f) / maxOf(1, bitmap.width - box.width)
+                    val y = (face.exactCenterY() + face.height() * .16f - box.height / 2f) /
+                        maxOf(1, bitmap.height - box.height)
+                    val smoothX = prior.x * .28f + x.coerceIn(0f, 1f) * .72f
+                    val smoothY = prior.y * .28f + y.coerceIn(0f, 1f) * .72f
+                    val point = FacePoint(at - startMs, smoothX, smoothY)
+                    if (point.timeMs == 0L) path[0] = point else path += point
+                    found++
+                } finally { bitmap.recycle() }
+            }
+        } finally { detector.close() }
+        return if (found >= 2) path else emptyList()
+    }
+
 }

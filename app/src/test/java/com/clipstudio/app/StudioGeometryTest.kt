@@ -7,7 +7,7 @@ import org.junit.Test
 
 class StudioGeometryTest {
     @Test fun segmentOffsetsUseSourceTimeline() {
-        assertEquals(SegmentRow("part-00001.mp4", 40_200), parseSegmentRow("part-00001.mp4,40.2,81.8"))
+        assertEquals(SegmentRow("part-00001.mp4", 40_200, 81_800), parseSegmentRow("part-00001.mp4,40.2,81.8"))
         assertNull(parseSegmentRow("part-00001.mp4,40.2,"))
         assertNull(parseSegmentRow("../part-00001.mp4,0,40"))
     }

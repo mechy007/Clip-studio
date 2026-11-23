@@ -10,9 +10,9 @@ Clip Studio is an Android-only editor for turning recorded videos into short cli
 4. Generate offline captions in auto-detect mode or a selected language, edit their text, and choose Clean, Karaoke, or Pop. Save an SRT file for an external editor when needed.
 5. Export one MP4 or queue up to ten. Choose 720p or 1080p, with optional muting. Files go to `Movies/Clip Studio` and can be shared from the app.
 
-Compatible YouTube recordings yield independently playable sections as the source arrives. Sections can be analyzed, trimmed, and exported while the download continues. A recording without a compatible progressive format can use the full-file importer. A clip within the progressive view is limited to its selected section, and YouTube availability varies by recording.
+Compatible YouTube recordings yield independently playable sections as the source arrives. Sections can be analyzed, trimmed, and exported while the download continues. A recording without a compatible progressive format can use the full-file importer. Adjacent ready sections can be joined for clips that cross a boundary. YouTube availability varies by recording.
 
-Grant notification permission to see import, analysis, and export progress outside the app. The latest imported project, completed sections, and highlight suggestions can be reopened after a restart. Interrupted transfers must be started again. Queued clips and their selected caption styles are restored with the project. Unqueued caption edits are kept during the current app session. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
+Grant notification permission to see import, analysis, and export progress outside the app. Saved projects, completed sections, highlight suggestions, and finished clip links can be reopened after a restart. Compatible progressive YouTube transfers can resume from a saved section boundary. Queued clips and their selected caption styles are restored with the project. Unqueued caption edits are kept during the current app session. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
 
 ## Build
 
@@ -32,3 +32,12 @@ The build verifies the SHA-256 fingerprints of its bundled offline speech and au
 - [PySceneDetect](https://github.com/Breakthrough/PySceneDetect) was a reference for visual-change detection. [YAMNet's class map](https://github.com/tensorflow/models/blob/master/research/audioset/yamnet/yamnet_class_map.csv) informed which reaction events to use.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and models.
+
+## Timeline and project tools
+
+- **Preview edited clip** renders a lower-resolution playback copy using the export layout, facecam path, audio effects, and caption timings. The waveform and playhead scrub the source while setting the clip boundaries.
+- **Resume download** uses the saved section boundary and selected format when reconnecting to a compatible recorded YouTube source. **Edit across next section** joins two consecutive ready parts into an edit source while the rest of the download continues.
+- **Highlight focus** offers balanced, funny reactions, gameplay action, and talking highlights. Nearby overlapping suggestions are deduplicated.
+- **Track facecam** samples the trimmed interval and animates its crop. Either crop can be locked, and framing can still be adjusted manually.
+- **Projects** keeps recent recordings, queued exports, and generated MP4 links. Save a **Creator preset** to reuse layout, crops, captions, quality, and audio settings.
+- **Audio finishing** adds loudness normalization, fades, and optional independent gains for the source's first two audio tracks. A source with one premixed track supports normalization and fades.

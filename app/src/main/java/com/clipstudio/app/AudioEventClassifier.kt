@@ -18,7 +18,8 @@ data class AudioEventWindow(
     val endMs: Long,
     val laughter: Float,
     val shouting: Float,
-    val cheering: Float
+    val cheering: Float,
+    val speech: Float = 0f
 )
 
 /** Runs the bundled YAMNet model on mono 16 kHz PCM and keeps only reaction signals. */
@@ -32,6 +33,7 @@ object AudioEventClassifier {
     private val laughterClasses = intArrayOf(13, 14, 15, 16, 17, 18)
     private val shoutingClasses = intArrayOf(6, 9, 10, 11)
     private val cheeringClasses = intArrayOf(8, 61, 62, 64)
+    private val speechClasses = intArrayOf(0, 1, 2, 3)
 
     @Volatile private var cachedSession: OrtSession? = null
     private val environment: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
@@ -54,7 +56,7 @@ object AudioEventClassifier {
             return@withContext emptyList()
         }
         val durationMs = pcmFile.length() / Float.SIZE_BYTES * 1_000L / SAMPLE_RATE
-        val windows = Array(((durationMs + 999L) / 1_000L).toInt().coerceAtLeast(1)) { FloatArray(3) }
+        val windows = Array(((durationMs + 999L) / 1_000L).toInt().coerceAtLeast(1)) { FloatArray(4) }
         val inputName = session.inputNames.firstOrNull() ?: return@withContext emptyList()
         val chunkSamples = SAMPLE_RATE * CHUNK_SECONDS
         try {
@@ -93,6 +95,7 @@ object AudioEventClassifier {
                             target[0] = maxOf(target[0], maxClassScore(scores, laughterClasses))
                             target[1] = maxOf(target[1], maxClassScore(scores, shoutingClasses))
                             target[2] = maxOf(target[2], maxClassScore(scores, cheeringClasses))
+                            target[3] = maxOf(target[3], maxClassScore(scores, speechClasses))
                         }
                     }
                     overlap = if (inputDone) FloatArray(0)
@@ -113,7 +116,8 @@ object AudioEventClassifier {
             AudioEventWindow(
                 startMs = second * 1_000L,
                 endMs = minOf(durationMs, (second + 1L) * 1_000L).coerceAtLeast(second * 1_000L + 1L),
-                laughter = values[0], shouting = values[1], cheering = values[2]
+                laughter = values[0], shouting = values[1], cheering = values[2],
+                speech = values[3]
             )
         }
     }
