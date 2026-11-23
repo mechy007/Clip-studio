@@ -156,6 +156,7 @@ internal class LiveFramingView(
     override fun onDetachedFromWindow() {
         close()
         super.onDetachedFromWindow()
+        scene.releaseTexture()
     }
 
     private data class Framing(val layout: Layout, val camera: Crop, val game: Crop, val path: List<FacePoint>)
@@ -165,7 +166,7 @@ internal class LiveFramingView(
         @Volatile var framing = Framing(Layout.Split, Crop(.5f, .5f), Crop(.5f, .5f), emptyList())
         @Volatile var source = SourceSize(0, 0)
         @Volatile var position = 0L
-        private var texture: SurfaceTexture? = null
+        @Volatile private var texture: SurfaceTexture? = null
         private val pending = AtomicBoolean()
         private var hasFrame = false
         private var textureName = 0
@@ -183,8 +184,7 @@ internal class LiveFramingView(
         }
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-            texture?.setOnFrameAvailableListener(null)
-            texture?.release()
+            releaseTexture()
             hasFrame = false
             pending.set(false)
             val names = IntArray(1)
@@ -216,10 +216,12 @@ internal class LiveFramingView(
             val fresh = SurfaceTexture(textureName)
             texture = fresh
             fresh.setOnFrameAvailableListener({
-                pending.set(true)
-                requestRender()
+                if (texture === fresh) {
+                    pending.set(true)
+                    requestRender()
+                }
             }, main)
-            main.post { bind(fresh) }
+            main.post { if (texture === fresh) bind(fresh) }
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -279,10 +281,15 @@ internal class LiveFramingView(
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         }
 
-        fun close() {
-            texture?.setOnFrameAvailableListener(null)
-            texture?.release()
+        fun releaseTexture() {
+            val old = texture
             texture = null
+            old?.setOnFrameAvailableListener(null)
+            old?.release()
+        }
+
+        fun close() {
+            releaseTexture()
             glDeleteTextures(1, intArrayOf(textureName), 0)
             if (program != 0) glDeleteProgram(program)
         }

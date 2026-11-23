@@ -244,11 +244,11 @@ internal object StudioMedia {
             return Rendered(output, RenderStats(encoder, renderStart - started,
                 SystemClock.elapsedRealtime() - renderStart, 0, retried))
         }
-        suspend fun attempt(encoder: String, args: Array<String>, verifyDuration: Boolean): Boolean {
+        suspend fun attempt(encoder: String, args: Array<String>, durationToleranceMs: Long? = null): Boolean {
             phase(encoder)
             output.delete()
             if (firstAttempt == null) firstAttempt = SystemClock.elapsedRealtime()
-            return runFfmpeg(args) && if (verifyDuration) validDuration(context, output, length)
+            return runFfmpeg(args) && if (durationToleranceMs != null) validDuration(context, output, length, durationToleranceMs)
             else YouTubeDownloadValidation.isValidMp4(output)
         }
         fun inputArgs() = listOf("-nostdin", "-loglevel", "error", "-y", "-ss", seconds(startMs),
@@ -258,7 +258,7 @@ internal object StudioMedia {
             if (clip.originalFraming && !preview && FastMedia.canCopyTrim(context, part.uri, startMs)) {
                 val args = inputArgs() + listOf("-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
                     "-avoid_negative_ts", "disabled", "-use_editlist", "1") + outputArgs
-                if (attempt("Copying source tracks", args.toTypedArray(), true)) return@withContext result("Stream copy")
+                if (attempt("Copying source tracks", args.toTypedArray(), 50)) return@withContext result("Stream copy")
                 retried = true
             }
             val (frameWidth, frameHeight) = layout.dimensions(width)
@@ -287,7 +287,7 @@ internal object StudioMedia {
                 val hardware = FastMedia.hardwareAvc(frameWidth, frameHeight)
                 if (hardware != null) {
                     val codec = listOf("-c:v", "h264_mediacodec", "-codec_name", hardware, "-bf", "0")
-                    if (attempt("Rendering with hardware H.264", arguments(codec, "nv12"), true) &&
+                    if (attempt("Rendering with hardware H.264", arguments(codec, "nv12"), 150) &&
                         FastMedia.matchesVideo(context, Uri.fromFile(output), frameWidth, frameHeight, tracks > 0)) {
                         return@withContext result("Hardware H.264")
                     }
@@ -296,7 +296,7 @@ internal object StudioMedia {
             }
             val software = arguments(listOf("-threads", "2", "-c:v", "libopenh264"), "yuv420p")
             check(attempt(if (retried) "Retrying with software H.264" else "Rendering with software H.264",
-                software, false)) { "Could not render this clip." }
+                software)) { "Could not render this clip." }
             result("Software H.264")
         } finally {
             if (!done) output.delete()
@@ -304,10 +304,10 @@ internal object StudioMedia {
         }
     }
 
-    private suspend fun validDuration(context: Context, file: File, expected: Long): Boolean {
+    private suspend fun validDuration(context: Context, file: File, expected: Long, toleranceMs: Long = 150): Boolean {
         if (!YouTubeDownloadValidation.isValidMp4(file)) return false
         return try {
-            abs(duration(context, Uri.fromFile(file)) - expected) <= 150
+            abs(duration(context, Uri.fromFile(file)) - expected) <= toleranceMs
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) { false }
