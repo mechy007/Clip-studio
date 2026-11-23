@@ -82,6 +82,8 @@ internal fun ClipEditor(
     var showPreview by rememberSaveable { mutableStateOf(false) }
     var live by rememberSaveable { mutableStateOf(false) }
     var fast by rememberSaveable { mutableStateOf(true) }
+    var highDetail by rememberSaveable { mutableStateOf(false) }
+    var originalSize by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var sourceSize by remember { mutableStateOf(0 to 0) }
     var trackingOn by rememberSaveable { mutableStateOf(false) }
     var normalize by rememberSaveable { mutableStateOf(false) }
@@ -121,6 +123,11 @@ internal fun ClipEditor(
             rebaseTracking(tracking.path, start - tracking.start, end - tracking.start)
         } else emptyList()
     }
+    LaunchedEffect(part.uri, layout) {
+        if (layout == Layout.Split && originalSize == null) {
+            originalSize = StudioFraming.sourceDimensions(context, part.uri)
+        }
+    }
     LaunchedEffect(part.uri) {
         audioTracks = withContext(Dispatchers.IO) { StudioMedia.audioTrackCount(context, part.uri) }
         waveform = try {
@@ -135,13 +142,14 @@ internal fun ClipEditor(
     fun audioOptions() = AudioFinish(normalize, fades, mix && audioTracks >= 2, voiceLevel, gameLevel)
     fun clip() = ExportClip(
         part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(),
-        preset, audioOptions(), facePath, fastExport = fast
+        preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail
     )
     val previewUri = state.playback?.takeIf { it.first == clip() }?.second
-    LaunchedEffect(part.uri, frameAt, live) {
+    LaunchedEffect(part.uri, frameAt, live, layout) {
         if (live) return@LaunchedEffect
         frame = try {
-            StudioFraming.frame(context, part.uri, frameAt.coerceIn(0, part.durationMs - 1))
+            StudioFraming.frame(context, part.uri, frameAt.coerceIn(0, part.durationMs - 1),
+                maxEdge = if (layout == Layout.Split) 1440 else 960)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
@@ -166,6 +174,7 @@ internal fun ClipEditor(
                 )
             }
         }
+        Text("Draft preview · export uses your selected resolution", style = MaterialTheme.typography.bodySmall)
     } else if (live) {
         val (liveWidth, liveHeight) = layout.dimensions(720)
         val gestures = framingGestures(layout, sourceSize.first, sourceSize.second, camera, gameplay,
@@ -291,6 +300,15 @@ internal fun ClipEditor(
             if (!lockGame) FramingSliders("Gameplay", gameplay) { gameplay = it }
         }
     }
+    if (layout == Layout.Split) originalSize?.let { (sourceWidth, sourceHeight) ->
+        val (cropWidth, cropHeight) = facecamCropPixels(sourceWidth, sourceHeight, camera.zoom)
+        val panelHeight = layout.dimensions(width).second / 2
+        val enlarged = cropWidth < width || cropHeight < panelHeight
+        Text("Facecam crop · ${cropWidth}×$cropHeight source pixels · ${width}×$panelHeight output",
+            style = MaterialTheme.typography.bodySmall)
+        if (enlarged) Text("The export enlarges this crop. Try a wider crop or a higher-resolution source for more detail.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
     Text("Trim · ${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}")
     RangeSlider(
         value = start.toFloat()..end.toFloat(), onValueChange = {
@@ -381,6 +399,9 @@ internal fun ClipEditor(
     if (options) {
         FilterChip(selected = fast, onClick = { fast = !fast }, label = { Text("Fast Export") })
         if (fast) Text("Tries hardware H.264 at the selected resolution", style = MaterialTheme.typography.bodySmall)
+        FilterChip(selected = highDetail, onClick = { highDetail = !highDetail }, label = { Text("High detail") })
+        if (highDetail) Text("Higher bitrate preserves more detail and makes larger MP4 files.",
+            style = MaterialTheme.typography.bodySmall)
         OutlinedButton(enabled = canExport, onClick = {
             StudioSession.export(context, listOf(clip().copy(fastExport = true, originalFraming = true,
                 captions = emptyList(), facePath = emptyList(), audio = AudioFinish(), muted = false)))

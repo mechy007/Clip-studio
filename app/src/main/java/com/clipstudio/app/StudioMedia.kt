@@ -279,7 +279,11 @@ internal object StudioMedia {
             val graph = if (audioFilter == null) renderFilter else "$renderFilter;$audioFilter"
             fun arguments(codec: List<String>, pixels: String): Array<String> {
                 val rate = if (clip.originalFraming) emptyList() else listOf("-r", "30")
-                val bitrate = if (width == 1080 || clip.originalFraming) "4500k" else "2600k"
+                val bitrate = when {
+                    !preview && !clip.originalFraming && clip.highDetail -> if (width == 1080) "8500k" else "4500k"
+                    width == 1080 || clip.originalFraming -> "4500k"
+                    else -> "2600k"
+                }
                 return (inputArgs() + listOf("-filter_complex_threads", "2", "-filter_complex", graph, "-map", video) +
                     rate + codec + listOf("-b:v", bitrate, "-pix_fmt", pixels) + audio + outputArgs).toTypedArray()
             }
