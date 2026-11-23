@@ -9,7 +9,9 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.util.UUID
 
-internal data class PartReview(val part: SourcePart, val highlights: List<Highlight>? = null)
+internal data class PartReview(
+    val part: SourcePart, val highlights: List<Highlight>? = null, val released: Boolean = false
+)
 internal data class StudioProject(
     val name: String, val layout: Layout, val parts: List<PartReview>, val queue: List<ExportClip> = emptyList(),
     val id: String = UUID.randomUUID().toString(),
@@ -18,8 +20,15 @@ internal data class StudioProject(
     val renderStats: Map<Uri, RenderStats> = emptyMap(),
     val guidedImport: Boolean = false,
     val guidedStartMs: Long = 0,
-    val drafts: Map<Uri, ClipDraft> = emptyMap()
+    val drafts: Map<Uri, ClipDraft> = emptyMap(),
+    val exportedParts: Set<Uri> = emptySet()
 ) {
+    val availableParts: List<PartReview> get() = parts.filterNot { it.released }
+
+    fun canRelease(part: SourcePart): Boolean =
+        guidedImport && !part.joined && part.uri in exportedParts &&
+            availableParts.any { it.part == part } && queue.none { it.part == part }
+
     val latestSourcePart: SourcePart? get() = parts.asSequence().map { it.part }
         .filter { !it.joined }.maxByOrNull { it.nextOffsetMs }
 }
@@ -73,10 +82,13 @@ internal class StudioProjectStore(context: Context) {
 
     private fun readProject(root: JSONObject): StudioProject {
         val rows = root.getJSONArray("parts")
+        val guided = root.optBoolean("guidedImport")
         val parts = (0 until rows.length()).mapNotNull { index ->
             val row = rows.getJSONObject(index)
             val uri = Uri.parse(row.getString("uri"))
-            if (uri.scheme == "file" && uri.path?.let { File(it).isFile } != true) return@mapNotNull null
+            val missing = uri.scheme == "file" && uri.path?.let { File(it).isFile } != true
+            val released = row.optBoolean("released") || (guided && missing)
+            if (missing && !released) return@mapNotNull null
             val offset = row.getLong("offset")
             val duration = row.getLong("duration")
             val part = SourcePart(uri, offset, duration, row.optLong("next", offset + duration),
@@ -87,9 +99,9 @@ internal class StudioProjectStore(context: Context) {
                     Highlight(item.getLong("start"), item.getLong("end"), item.getInt("score"), item.getString("reason"))
                 }
             }
-            PartReview(part, highlights)
+            PartReview(part, if (released) null else highlights, released)
         }
-        val sources = parts.associateBy { it.part.uri.toString() }
+        val sources = parts.filterNot { it.released }.associateBy { it.part.uri.toString() }
         val queue = root.optJSONArray("queue")?.let { items ->
             (0 until items.length()).mapNotNull { index ->
                 runCatching restoreClip@{
@@ -117,11 +129,14 @@ internal class StudioProjectStore(context: Context) {
             Uri.parse(key) to RenderStats(encoder, item.optLong("prepare"), item.optLong("render"),
                 item.optLong("save"), item.optBoolean("retry"))
         }.toMap()
+        val exportedParts = root.optJSONArray("exportedParts")?.let { entries ->
+            (0 until entries.length()).map { Uri.parse(entries.getString(it)) }.toSet()
+        }.orEmpty()
         return StudioProject(root.getString("name"), Layout.valueOf(root.getString("layout")), parts, queue,
             root.optString("id", UUID.randomUUID().toString()),
             root.optString("youtube", "").takeIf { it.isNotEmpty() },
             root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
-            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, root.optBoolean("guidedImport"), root.optLong("guidedStartMs"), drafts)
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, guided, root.optLong("guidedStartMs"), drafts, exportedParts)
     }
 
     fun save(library: StudioLibrary) {
@@ -145,7 +160,7 @@ internal class StudioProjectStore(context: Context) {
             val part = review.part
             val row = JSONObject().put("uri", part.uri.toString()).put("offset", part.offsetMs)
                 .put("duration", part.durationMs).put("next", part.nextOffsetMs)
-                .put("format", part.formatId.orEmpty()).put("joined", part.joined)
+                .put("format", part.formatId.orEmpty()).put("joined", part.joined).put("released", review.released)
             review.highlights?.let { highlights ->
                 val items = JSONArray()
                 highlights.forEach { items.put(JSONObject().put("start", it.startMs).put("end", it.endMs)
@@ -165,6 +180,7 @@ internal class StudioProjectStore(context: Context) {
             .put("id", project.id).put("youtube", project.youtubeLink.orEmpty()).put("complete", project.importComplete)
             .put("mode", project.mode.name).put("exports", JSONArray(project.exports.map(Uri::toString))).put("renderStats", timings)
             .put("parts", rows).put("queue", queue).put("guidedImport", project.guidedImport)
+            .put("exportedParts", JSONArray(project.exportedParts.map(Uri::toString)))
             .put("guidedStartMs", project.guidedStartMs).put("drafts", JSONArray(project.drafts.values.map { it.json() }))
     }
 

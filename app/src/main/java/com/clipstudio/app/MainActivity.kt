@@ -2,6 +2,7 @@ package com.clipstudio.app
 
 import android.Manifest
 import android.provider.Settings
+import android.text.format.Formatter
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
@@ -66,6 +67,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import java.util.Locale
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val StudioColors = darkColorScheme(
     primary = Color(0xFFA78BFA), onPrimary = Color(0xFF19102D),
@@ -107,6 +111,7 @@ class MainActivity : ComponentActivity() {
         var recordingStart by rememberSaveable { mutableStateOf("") }
         val startMs = recordingStartMs(recordingStart)
         var seenGuidedPart by rememberSaveable { mutableStateOf<String?>(null) }
+        var removePartUri by rememberSaveable { mutableStateOf<String?>(null) }
         var nextPartDialog by rememberSaveable { mutableStateOf(false) }
         var seenGuidedExport by remember { mutableStateOf(state.guidedExportRevision) }
         var incomingLayout by rememberSaveable { mutableStateOf(Layout.Split) }
@@ -170,9 +175,23 @@ class MainActivity : ComponentActivity() {
             seenGuidedExport = state.guidedExportRevision
             nextPartDialog = false
         }
-        val selected = project?.parts?.find { it.part.uri.toString() == selectedPart }
-            ?: project?.parts?.find { it.part == latestGuidedPart }
-            ?: project?.parts?.firstOrNull()
+        val availableParts = project?.availableParts.orEmpty()
+        val selected = availableParts.find { it.part.uri.toString() == selectedPart }
+            ?: availableParts.find { it.part == latestGuidedPart }
+            ?: availableParts.firstOrNull()
+        val releaseCandidate = availableParts.firstOrNull { it.part.uri.toString() == removePartUri }?.part
+        if (releaseCandidate != null && project?.canRelease(releaseCandidate) == true) {
+            AlertDialog(
+                onDismissRequest = { removePartUri = null },
+                title = { Text("Remove downloaded footage?") },
+                text = { Text("This removes the source footage and its draft. Your exported MP4s stay in Movies/Clip Studio.") },
+                confirmButton = { TextButton(enabled = !occupied, onClick = {
+                    removePartUri = null
+                    StudioSession.releasePart(this@MainActivity, releaseCandidate)
+                }) { Text("Remove footage") } },
+                dismissButton = { TextButton(onClick = { removePartUri = null }) { Text("Keep footage") } }
+            )
+        }
         if (nextPartDialog && canDownloadPart) {
             AlertDialog(
                 onDismissRequest = { nextPartDialog = false },
@@ -183,7 +202,7 @@ class MainActivity : ComponentActivity() {
             )
         }
         val suggestions = remember(project?.parts) {
-            project?.parts.orEmpty().flatMap { review ->
+            availableParts.flatMap { review ->
                 review.highlights.orEmpty().map { review.part to it }
             }.sortedByDescending { it.second.score }.take(10)
         }
@@ -225,7 +244,7 @@ class MainActivity : ComponentActivity() {
                         Text(label, Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 5.dp), maxLines = 2,
                             overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.secondary,
                             style = MaterialTheme.typography.labelSmall)
-                        activeWork?.let { work ->
+                        activeWork?.takeUnless { it == Work.STORAGE }?.let { work ->
                             TextButton(onClick = { StudioSession.cancel(work) }) {
                                 Text(if (work == Work.IMPORT && project?.guidedImport == true) "Pause" else "Cancel")
                             }
@@ -317,7 +336,7 @@ class MainActivity : ComponentActivity() {
                                 state.jobs.forEach { (work, label) ->
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(label, Modifier.weight(1f), color = MaterialTheme.colorScheme.secondary)
-                                        TextButton(onClick = { StudioSession.cancel(work) }) { Text("Cancel") }
+                                        if (work != Work.STORAGE) TextButton(onClick = { StudioSession.cancel(work) }) { Text("Cancel") }
                                     }
                                 }
                             }
@@ -332,7 +351,7 @@ class MainActivity : ComponentActivity() {
                                 }) { Text("Resume download") }
                             }
                             if (selected != null && project != null) {
-                                Text("${project.parts.size} sections ready", style = MaterialTheme.typography.titleMedium)
+                                Text("${availableParts.size} sections ready", style = MaterialTheme.typography.titleMedium)
                                 OutlinedButton(onClick = { tab = StudioTab.Editor }) { Text("Open editor") }
                             }
                         }
@@ -352,7 +371,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
-                            if (project.parts.any { it.highlights == null } && Work.ANALYZE !in state.jobs) {
+                            if (availableParts.any { it.highlights == null } && Work.ANALYZE !in state.jobs) {
                                 OutlinedButton(onClick = { StudioSession.analyze(this@MainActivity) }) { Text("Find highlights") }
                             }
                             if (suggestions.isNotEmpty()) {
@@ -373,14 +392,22 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 }
-                            } else if (project.parts.all { it.highlights != null }) {
+                            } else if (availableParts.isNotEmpty() && availableParts.all { it.highlights != null }) {
                                 Text("No strong highlight signals found. You can still trim a section manually.")
                                 TextButton(onClick = { tab = StudioTab.Editor }) { Text("Open editor") }
                             }
                         }
                         StudioTab.Editor -> if (project == null || selected == null) {
-                            Text("Open a video to start editing", style = MaterialTheme.typography.titleLarge)
-                            Button(onClick = { tab = StudioTab.Import }) { Text("Import video") }
+                            if (project?.guidedImport == true && project.parts.isNotEmpty()) {
+                                Text("No downloaded footage available", style = MaterialTheme.typography.titleLarge)
+                                if (guidedPending) Button(enabled = canDownloadPart, onClick = ::downloadNextPart) {
+                                    Text("Download part $nextPartNumber")
+                                }
+                                OutlinedButton(onClick = { tab = StudioTab.Projects }) { Text("Open exports") }
+                            } else {
+                                Text("Open a video to start editing", style = MaterialTheme.typography.titleLarge)
+                                Button(onClick = { tab = StudioTab.Import }) { Text("Import video") }
+                            }
                         } else {
                             if (project.guidedImport) {
                                 val sourceParts = project.parts.filterNot { it.part.joined }
@@ -389,16 +416,26 @@ class MainActivity : ComponentActivity() {
                                     Text("Part $partNumber · ${timestamp(selected.part.offsetMs)}–${timestamp(selected.part.nextOffsetMs)}",
                                         style = MaterialTheme.typography.titleMedium)
                                 }
+                                val queuedCount = project.queue.count { it.part == selected.part }
+                                if (queuedCount > 0 || selected.part.uri in project.exportedParts) {
+                                    Button(enabled = !exporting && Work.IMPORT !in state.jobs && Work.STORAGE !in state.jobs,
+                                        onClick = {
+                                            StudioSession.finishPart(this@MainActivity, selected.part)
+                                            if (queuedCount > 0) showNotificationPermission()
+                                        }) {
+                                        Text(if (queuedCount == 0) "Finish this part" else "Finish this part · $queuedCount queued")
+                                    }
+                                }
                                 if (guidedPending) OutlinedButton(
                                     enabled = canDownloadPart, onClick = { nextPartDialog = true }
                                 ) { Text("Download part $nextPartNumber") }
                             }
-                            if (project.parts.size > 1) {
+                            if (availableParts.size > 1) {
                                 var expanded by rememberSaveable { mutableStateOf(false) }
                                 TextButton(onClick = { expanded = !expanded }) {
-                                    Text("${project.parts.size} ready sections · ${timestamp(selected.part.offsetMs)} selected")
+                                    Text("${availableParts.size} ready sections · ${timestamp(selected.part.offsetMs)} selected")
                                 }
-                                if (expanded) project.parts.forEach { review ->
+                                if (expanded) availableParts.forEach { review ->
                                     val part = review.part
                                     FilterChip(
                                         selected = review == selected, onClick = {
@@ -411,7 +448,7 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                             }
-                            val next = project.parts.map { it.part }.firstOrNull { adjacent(selected.part, it) }
+                            val next = availableParts.map { it.part }.firstOrNull { adjacent(selected.part, it) }
                             if (next != null) {
                                 OutlinedButton(enabled = Work.JOIN !in state.jobs, onClick = {
                                     StudioSession.join(this@MainActivity, selected.part, next)
@@ -450,6 +487,38 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
+                            if (project?.guidedImport == true && project.parts.isNotEmpty()) {
+                                var storageOpen by rememberSaveable { mutableStateOf(false) }
+                                SettingsDisclosure("Free up storage", storageOpen, { storageOpen = !storageOpen }) {
+                                    val downloaded = project.parts.filterNot { it.part.joined }
+                                    var sizes by remember(downloaded) { mutableStateOf<Map<Uri, Long>>(emptyMap()) }
+                                    LaunchedEffect(downloaded) {
+                                        sizes = withContext(Dispatchers.IO) {
+                                            downloaded.filterNot { it.released }.associate { review ->
+                                                review.part.uri to (review.part.uri.path?.let { File(it).length() } ?: 0L)
+                                            }
+                                        }
+                                    }
+                                    downloaded.forEachIndexed { index, review ->
+                                        val part = review.part
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Column(Modifier.weight(1f)) {
+                                                Text("Part ${index + 1} · ${timestamp(part.offsetMs)}–${timestamp(part.nextOffsetMs)}")
+                                                val storage = if (review.released) "Footage removed" else
+                                                    sizes[part.uri]?.let { Formatter.formatFileSize(this@MainActivity, it) }
+                                                storage?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+                                            }
+                                            if (project.canRelease(part)) {
+                                                TextButton(enabled = !occupied, onClick = { removePartUri = part.uri.toString() }) {
+                                                    Text("Remove")
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Text("Export a clip from a part and finish its queued exports to remove the footage.",
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                             if (state.queue.isNotEmpty()) {
                                 HorizontalDivider()
                                 Text("Export queue", style = MaterialTheme.typography.titleLarge)
@@ -460,7 +529,7 @@ class MainActivity : ComponentActivity() {
                                             Text(if (clip.captions.isEmpty()) "No captions" else "${clip.preset.label} captions",
                                                 style = MaterialTheme.typography.labelSmall)
                                         }
-                                        if (clip != state.exportingClip) TextButton(onClick = {
+                                        if (clip != state.exportingClip && !state.finishingPart) TextButton(onClick = {
                                             StudioSession.exportFirst(this@MainActivity, clip)
                                             showNotificationPermission()
                                         }) { Text(if (state.queueExportActive) "Next" else if (exporting) "Move first" else "Export first") }
