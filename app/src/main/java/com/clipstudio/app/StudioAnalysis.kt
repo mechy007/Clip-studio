@@ -34,14 +34,15 @@ internal object StudioAnalysis {
         }
     }
 
-    suspend fun captions(context: Context, part: SourcePart, startMs: Long, endMs: Long, language: String?) =
+    suspend fun captions(context: Context, part: SourcePart, startMs: Long, endMs: Long, language: String?, audioTrack: Int) =
         withContext(Dispatchers.IO) {
             require(endMs - startMs in 1..MAX_CAPTION_DURATION_MS) { "Choose a clip of up to 2 minutes for captions." }
             val pcm = File.createTempFile("studio-speech-", ".pcm", context.cacheDir)
             try {
-                if (!StudioMedia.decodeAudio(context, part, pcm, startMs, endMs) || pcm.length() < 4) {
-                    return@withContext emptyList<TranscriptSegment>()
+                check(StudioMedia.decodeAudio(context, part, pcm, startMs, endMs, audioTrack)) {
+                    "Could not read audio track ${audioTrack + 1} for captions."
                 }
+                if (pcm.length() < 4) return@withContext emptyList<TranscriptSegment>()
                 WhisperModelManager.ensureModel(context) { _, _ -> }
                 try {
                     WhisperEngine.beginSession(context)

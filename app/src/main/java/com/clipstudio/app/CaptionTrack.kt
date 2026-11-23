@@ -26,6 +26,11 @@ enum class CaptionPosition(val label: String, internal val alignment: Int) {
 
 /** Converts source-relative transcripts to clip-relative captions for render and SRT export. */
 object CaptionTrack {
+    internal fun custom(text: String, durationMs: Long): List<CaptionCue> {
+        if (text.isBlank() || durationMs <= 0) return emptyList()
+        return listOf(CaptionCue(0, durationMs, wrapText(text.trim(), 28)))
+    }
+
     fun fromTranscript(
         transcript: List<TranscriptSegment>,
         clipStartMs: Long,
