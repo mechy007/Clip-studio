@@ -29,6 +29,9 @@ jobs:
         with:
           packages: platform-tools
 
+      - name: Install native build tools
+        run: sdkmanager "ndk;27.2.12479018" "cmake;3.22.1"
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:

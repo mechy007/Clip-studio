@@ -6,6 +6,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.MediaStore
 import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.ReturnCode
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -44,7 +45,7 @@ internal object StudioMedia {
     ): Boolean = withContext(Dispatchers.IO) {
         val videoId = YouTubeLinkClassifier.parseVideoId(link)
         val source = runInterruptible {
-            YoutubeDL.init(context)
+            YouTubeVideoImporter.prepare(context)
             val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
                 .addOption("--no-playlist")
                 .addOption("--match-filter", "!is_live & !is_upcoming")
@@ -101,33 +102,48 @@ internal object StudioMedia {
 
     suspend fun export(
         context: Context, part: SourcePart, startMs: Long, endMs: Long,
-        layout: Layout, camera: Crop, gameplay: Crop
+        layout: Layout, camera: Crop, gameplay: Crop,
+        width: Int = 1080, muted: Boolean = false, captions: List<CaptionCue> = emptyList(),
+        preset: CaptionPreset = CaptionPreset.KARAOKE
     ): Uri = withContext(Dispatchers.IO) {
         require(startMs in 0 until endMs && endMs <= part.durationMs)
         val output = File.createTempFile("studio-export-", ".mp4", context.cacheDir)
-        val copy = if (part.uri.scheme == "file") null else
-            File.createTempFile("studio-input-", ".media", context.cacheDir)
+        val subtitle = if (captions.isEmpty()) null else File.createTempFile("studio-captions-", ".ass", context.cacheDir)
         try {
-            val source = if (copy == null) requireNotNull(part.uri.path) else {
-                context.contentResolver.openInputStream(part.uri)?.use { input ->
-                    copy.outputStream().buffered().use { target -> input.copyTo(target) }
-                } ?: error("Could not read the source video.")
-                copy.absolutePath
+            val (frameWidth, frameHeight) = layout.dimensions(width)
+            val filter = videoFilter(layout, camera, gameplay, width)
+            val renderFilter = if (subtitle == null) filter else {
+                subtitle.writeText(AssKaraokeTrack.render(captions, preset, frameWidth, frameHeight))
+                "$filter;[out]subtitles=filename='${subtitle.absolutePath}':fontsdir=/system/fonts[captioned]"
             }
-            val success = runFfmpeg(arrayOf(
-                "-nostdin", "-loglevel", "error", "-y",
-                "-ss", seconds(startMs), "-i", source, "-t", seconds(endMs - startMs),
-                "-filter_complex", videoFilter(layout, camera, gameplay), "-map", "[out]", "-map", "0:a:0?",
-                "-r", "30", "-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output.absolutePath
-            ))
-            check(success && YouTubeDownloadValidation.isValidMp4(output)) { "Could not render this clip." }
+            val video = if (subtitle == null) "[out]" else "[captioned]"
+            val audio = if (muted) listOf("-an") else listOf("-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k")
+            val arguments = listOf(
+                "-nostdin", "-loglevel", "error", "-y", "-ss", seconds(startMs),
+                "-i", input(context, part.uri), "-t", seconds(endMs - startMs),
+                "-filter_complex_threads", "2", "-filter_complex", renderFilter, "-map", video,
+                "-r", "30", "-threads", "2", "-c:v", "libopenh264",
+                "-b:v", if (width == 1080) "4500k" else "2800k", "-pix_fmt", "yuv420p"
+            ) + audio + listOf("-movflags", "+faststart", output.absolutePath)
+            check(runFfmpeg(arguments.toTypedArray()) && YouTubeDownloadValidation.isValidMp4(output)) {
+                "Could not render this clip."
+            }
             saveToGallery(context, output)
         } finally {
             output.delete()
-            copy?.delete()
+            subtitle?.delete()
         }
     }
+
+    internal fun input(context: Context, uri: Uri): String =
+        if (uri.scheme == "file") requireNotNull(uri.path) else FFmpegKitConfig.getSafParameterForRead(context, uri)
+
+    internal suspend fun decodeAudio(context: Context, part: SourcePart, file: File, startMs: Long, endMs: Long): Boolean =
+        runFfmpeg(arrayOf(
+            "-nostdin", "-loglevel", "error", "-y", "-ss", seconds(startMs),
+            "-i", input(context, part.uri), "-t", seconds(endMs - startMs), "-map", "0:a:0",
+            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_f32be", "-f", "f32be", file.absolutePath
+        ))
 
     private fun saveToGallery(context: Context, file: File): Uri {
         val resolver = context.contentResolver

@@ -22,7 +22,9 @@ internal fun parseSegmentRow(row: String): SegmentRow? {
     return SegmentRow(name, (start * 1000).roundToLong())
 }
 
-internal fun videoFilter(layout: Layout, camera: Crop, game: Crop): String {
+internal fun videoFilter(layout: Layout, camera: Crop, game: Crop, resolution: Int = 1080): String {
+    val (outputWidth, outputHeight) = layout.dimensions(resolution)
+    val panelHeight = outputHeight / 2
     fun fill(width: Int, height: Int, crop: Crop): String {
         val ratio = "$width/$height"
         val zoom = crop.zoom.coerceIn(1f, 4f)
@@ -34,12 +36,25 @@ internal fun videoFilter(layout: Layout, camera: Crop, game: Crop): String {
             "scale=$width:$height,setsar=1"
     }
     return when (layout) {
-        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(1080, 960, camera)}[top];" +
-            "[b]${fill(1080, 960, game)}[bottom];[top][bottom]vstack[out]"
-        Layout.Fill -> "[0:v]${fill(1080, 1920, game)}[out]"
-        Layout.Fit -> "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease:" +
-            "force_divisible_by=2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1[out]"
-        Layout.Landscape -> "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease:" +
-            "force_divisible_by=2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[out]"
+        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera)}[top];" +
+            "[b]${fill(outputWidth, panelHeight, game)}[bottom];[top][bottom]vstack[out]"
+        Layout.Fill -> "[0:v]${fill(outputWidth, outputHeight, game)}[out]"
+        Layout.Fit, Layout.Landscape -> "[0:v]scale=$outputWidth:$outputHeight:force_original_aspect_ratio=decrease:" +
+            "force_divisible_by=2,pad=$outputWidth:$outputHeight:(ow-iw)/2:(oh-ih)/2,setsar=1[out]"
     }
+}
+
+internal fun Layout.dimensions(width: Int): Pair<Int, Int> =
+    if (this == Layout.Landscape) width * 16 / 9 to width else width to width * 16 / 9
+
+internal data class CropWindow(val x: Int, val y: Int, val width: Int, val height: Int)
+
+internal fun cropWindow(imageWidth: Int, imageHeight: Int, aspect: Float, crop: Crop): CropWindow {
+    val width = (minOf(imageWidth.toFloat(), imageHeight * aspect) / crop.zoom).toInt().coerceIn(1, imageWidth)
+    val height = (minOf(imageHeight.toFloat(), imageWidth / aspect) / crop.zoom).toInt().coerceIn(1, imageHeight)
+    return CropWindow(
+        ((imageWidth - width) * crop.x.coerceIn(0f, 1f)).toInt(),
+        ((imageHeight - height) * crop.y.coerceIn(0f, 1f)).toInt(),
+        width, height
+    )
 }
