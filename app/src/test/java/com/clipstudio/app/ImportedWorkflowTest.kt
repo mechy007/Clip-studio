@@ -17,6 +17,24 @@ class ImportedWorkflowTest {
         assertEquals(null, recordingStartMs("9223372036854775807"))
     }
 
+    @Test fun downloadChunksCoverTheRangeFromAChosenOffset() {
+        val range = RecordingPartWindow(5_040_000, 5_345_000)
+        assertEquals(listOf(
+            RecordingPartWindow(5_040_000, 5_160_000),
+            RecordingPartWindow(5_160_000, 5_280_000),
+            RecordingPartWindow(5_280_000, 5_345_000)
+        ), range.downloadChunks())
+        assertEquals(15, RecordingPartWindow(0, RECORDING_PART_MS).downloadChunks().size)
+    }
+
+    @Test fun remainingTimeUsesOnlyWorkDoneAfterResuming() {
+        val total = 1_800_000L
+        val saved = 1_200_000L
+        assertEquals(GuidedDownloadProgress(66, null), guidedDownloadProgress(total, saved, saved, 0))
+        assertEquals(GuidedDownloadProgress(73, 240_000), guidedDownloadProgress(total, saved, 1_320_000, 60_000))
+        assertEquals(GuidedDownloadProgress(100, null), guidedDownloadProgress(total, saved, total, 300_000))
+    }
+
     @Test fun guidedRecordingStartsAtTheLastCompletedBoundary() {
         val duration = 75 * 60_000L
         val first = requireNotNull(nextRecordingPart(0, duration))

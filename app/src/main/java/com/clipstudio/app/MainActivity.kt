@@ -216,18 +216,24 @@ class MainActivity : ComponentActivity() {
                         }) { Text("Export") }
                     }
                     HorizontalDivider()
-                    val label = state.jobs.values.firstOrNull() ?: state.status.ifBlank {
+                    val progress = state.guidedDownload
+                    val activeWork = if (progress != null) Work.IMPORT else state.jobs.keys.firstOrNull()
+                    val label = activeWork?.let { state.jobs[it] } ?: state.status.ifBlank {
                         if (project == null) "Ready to import" else "Editing on device"
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(label, Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 5.dp), maxLines = 2,
                             overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.secondary,
                             style = MaterialTheme.typography.labelSmall)
-                        state.jobs.keys.firstOrNull()?.let { work ->
-                            TextButton(onClick = { StudioSession.cancel(work) }) { Text("Cancel") }
+                        activeWork?.let { work ->
+                            TextButton(onClick = { StudioSession.cancel(work) }) {
+                                Text(if (work == Work.IMPORT && project?.guidedImport == true) "Pause" else "Cancel")
+                            }
                         }
                     }
-                    if (occupied) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (progress != null && !progress.assembling) {
+                        LinearProgressIndicator(progress = { progress.percent / 100f }, modifier = Modifier.fillMaxWidth())
+                    } else if (occupied) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             },
             bottomBar = {

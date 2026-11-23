@@ -32,6 +32,7 @@ internal data class StudioState(
     val joined: SourcePart? = null,
     val joinRevision: Long = 0,
     val guidedPart: SourcePart? = null,
+    val guidedDownload: GuidedDownloadProgress? = null,
     val guidedExportRevision: Int = 0,
     val storageWarning: String? = null,
     val playback: Pair<ExportClip, Uri>? = null,
@@ -136,9 +137,22 @@ internal object StudioSession {
         val link = project.youtubeLink ?: return
         val previous = project.latestSourcePart
         val partNumber = project.parts.count { !it.part.joined } + 1
-        describe(Work.IMPORT, "Downloading part $partNumber")
+        describe(Work.IMPORT, "Preparing part $partNumber")
+        val activeImport = jobs[Work.IMPORT]
         var downloaded = false
-        StudioMedia.downloadRecordingPart(app, link, previous?.nextOffsetMs ?: project.guidedStartMs, previous?.formatId) { part, last ->
+        StudioMedia.downloadRecordingPart(app, project.id, link, previous?.nextOffsetMs ?: project.guidedStartMs,
+            previous?.formatId, progress = { progress ->
+                scope.launch {
+                    if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
+                    val current = state.value.guidedDownload
+                    if (current?.assembling == true || progress.percent < (current?.percent ?: 0)) return@launch
+                    val label = if (progress.assembling) "Assembling part $partNumber" else buildString {
+                        append("Downloading part $partNumber · ${progress.percent}%")
+                        progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
+                    }
+                    update { it.copy(guidedDownload = progress, jobs = it.jobs + (Work.IMPORT to label)) }
+                }
+            }) { part, last ->
             withContext(Dispatchers.Main.immediate) {
                 addPart(app, part)
                 if (last) state.value.project?.let { save(it.copy(importComplete = true)) }
@@ -452,7 +466,9 @@ internal object StudioSession {
             try {
                 body(app)
             } catch (cancelled: CancellationException) {
-                if (key != Work.ANALYZE || !resumeAnalysis) status("Cancelled · completed work was kept")
+                if (key == Work.IMPORT && state.value.project?.guidedImport == true) {
+                    status("Download paused · saved pieces kept")
+                } else if (key != Work.ANALYZE || !resumeAnalysis) status("Cancelled · completed work was kept")
                 throw cancelled
             } catch (error: Exception) {
                 status(error.localizedMessage ?: "$label failed.")
@@ -467,6 +483,7 @@ internal object StudioSession {
                 }
                 update {
                     if (key == Work.EXPORT) it.copy(jobs = it.jobs - key, exportingClip = null, queueExportActive = false)
+                    else if (key == Work.IMPORT) it.copy(jobs = it.jobs - key, guidedDownload = null)
                     else it.copy(jobs = it.jobs - key)
                 }
             }

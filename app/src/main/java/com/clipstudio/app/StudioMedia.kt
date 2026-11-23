@@ -152,11 +152,9 @@ internal object StudioMedia {
         }
     }
 
-    /** Fetch a single bounded range and publish only after FFmpeg has closed the MP4. */
-    suspend fun downloadRecordingPart(
-        context: Context, link: String, startMs: Long, previousFormat: String?,
-        publish: suspend (SourcePart, Boolean) -> Unit
-    ) = withContext(Dispatchers.IO) {
+    private data class RecordingStreams(val endMs: Long, val format: String, val urls: List<String>)
+
+    private suspend fun resolveRecording(context: Context, link: String, previousFormat: String?): RecordingStreams {
         val id = YouTubeLinkClassifier.parseVideoId(link)
         val media = runInterruptible {
             YouTubeVideoImporter.prepare(context)
@@ -180,7 +178,6 @@ internal object StudioMedia {
         }
         val durationMs = media.optDouble("duration", 0.0).let { if (it.isFinite()) (it * 1000).toLong() else 0L }
         check(durationMs > 0) { "YouTube has not provided the recording length yet. Try again when the replay is ready." }
-        val range = nextRecordingPart(startMs, durationMs) ?: return@withContext
         val selectedFormat = media.optString("format_id")
         check(selectedFormat.isNotBlank() && (previousFormat == null || selectedFormat == previousFormat)) {
             "The saved YouTube format is unavailable. Completed parts are still available."
@@ -193,33 +190,108 @@ internal object StudioMedia {
             runCatching { URI(input) }.getOrNull()?.let { it.scheme == "https" && it.host != null } == true
         }) { "No compatible video and audio streams were available for this recording." }
 
-        val folder = File(context.filesDir, "imports").apply { mkdirs() }
-        val output = File.createTempFile("studio-recording-part-", ".mp4", folder)
-        var kept = false
-        try {
-            val seek = if (range.startMs == 0L) emptyList() else listOf("-ss", seconds(range.startMs))
-            val inputArgs = inputs.flatMap { url -> listOf("-rw_timeout", "20000000") + seek + listOf("-i", url) }
-            val durationArgs = listOf("-t", seconds(range.lengthMs))
-            val codec = listOf("-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart")
-            val args = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + durationArgs +
-                listOf("-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0") + codec + output.absolutePath
-            check(runFfmpeg(args.toTypedArray()) && YouTubeDownloadValidation.isValidMp4(output)) {
-                "This part could not finish downloading. Retry to start from the same point."
-            }
-            val uri = Uri.fromFile(output)
-            val actualDuration = duration(context, uri)
-            check(abs(actualDuration - range.lengthMs) <= minOf(1500L, range.lengthMs / 5)) {
-                "The downloaded part is incomplete. Retry to start from the same point."
-            }
-            currentCoroutineContext().ensureActive()
-            withContext(NonCancellable) {
-                publish(SourcePart(uri, range.startMs, actualDuration, range.endMs, selectedFormat), range.endMs == durationMs)
-                kept = true
-            }
-        } finally {
-            if (!kept) output.delete()
+        return RecordingStreams(durationMs, selectedFormat, inputs)
+    }
+
+    /** Commit each short piece locally so a retry does not fetch completed pieces again. */
+    suspend fun downloadRecordingPart(
+        context: Context, projectId: String, link: String, startMs: Long, previousFormat: String?,
+        progress: (GuidedDownloadProgress) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val projectKey = UUID.fromString(projectId).toString()
+        val directory = File(context.filesDir, "imports/guided/$projectKey/$startMs")
+        val files = GuidedDownloadFiles(directory)
+        var recording: RecordingStreams? = null
+        val plan = files.load(startMs) ?: run {
+            val streams = resolveRecording(context, link, previousFormat)
+            recording = streams
+            val range = nextRecordingPart(startMs, streams.endMs) ?: return@withContext
+            check(directory.isDirectory || directory.mkdirs()) { "Could not create download storage." }
+            GuidedDownloadPlan(range, streams.endMs, streams.format).also(files::save)
         }
+        val range = plan.range
+        val chunks = range.downloadChunks()
+        val publishedDuration = recordingDuration(context, files.output, range.lengthMs)
+        if (publishedDuration == null) {
+            files.output.delete()
+            val completed = chunks.mapIndexed { index, chunk ->
+                val file = files.chunk(index)
+                val ready = recordingDuration(context, file, chunk.lengthMs) != null
+                if (!ready) file.delete()
+                ready
+            }
+            val saved = chunks.zip(completed).sumOf { (chunk, ready) -> if (ready) chunk.lengthMs else 0L }
+            var processed = saved
+            val started = SystemClock.elapsedRealtime()
+            progress(guidedDownloadProgress(range.lengthMs, saved, processed, 0))
+            try {
+                for ((index, chunk) in chunks.withIndex()) {
+                    if (completed[index]) continue
+                    currentCoroutineContext().ensureActive()
+                    val streams = recording ?: resolveRecording(context, link, plan.format).also { recording = it }
+                    check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
+                    files.staging.delete()
+                    val beforeChunk = processed
+                    downloadRecordingChunk(context, streams.urls, chunk, files.staging) { time ->
+                        progress(guidedDownloadProgress(range.lengthMs, saved, beforeChunk + time,
+                            SystemClock.elapsedRealtime() - started))
+                    }
+                    check(files.staging.renameTo(files.chunk(index))) { "Could not save the downloaded piece." }
+                    processed += chunk.lengthMs
+                    progress(guidedDownloadProgress(range.lengthMs, saved, processed, SystemClock.elapsedRealtime() - started))
+                }
+                progress(GuidedDownloadProgress(100, null, assembling = true))
+                files.concatList.writeText(buildString {
+                    appendLine("ffconcat version 1.0")
+                    chunks.indices.forEach { index -> appendLine("file ${files.chunk(index).name}") }
+                })
+                check(runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-safe", "1",
+                    "-i", files.concatList.absolutePath, "-c", "copy", "-movflags", "+faststart", files.staging.absolutePath)) &&
+                    recordingDuration(context, files.staging, range.lengthMs) != null && files.staging.renameTo(files.output)
+                ) { "Could not assemble this part. Retry to reuse the downloaded pieces." }
+            } finally {
+                files.staging.delete()
+                files.concatList.delete()
+            }
+        }
+        val url = Uri.fromFile(files.output)
+        val actualDuration = publishedDuration ?: duration(context, url)
+        currentCoroutineContext().ensureActive()
+        withContext(NonCancellable) {
+            publish(SourcePart(url, range.startMs, actualDuration, range.endMs, plan.format), range.endMs == plan.recordingEndMs)
+            chunks.indices.forEach { files.chunk(it).delete() }
+        }
+    }
+
+    private suspend fun downloadRecordingChunk(
+        context: Context, inputs: List<String>, range: RecordingPartWindow, output: File, progress: (Long) -> Unit
+    ) {
+        val seek = if (range.startMs == 0L) emptyList() else listOf("-ss", seconds(range.startMs))
+        val inputArgs = inputs.flatMap { url -> listOf("-rw_timeout", "20000000") + seek + listOf("-i", url) }
+        val codec = listOf("-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart")
+        val args = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + listOf("-t", seconds(range.lengthMs),
+            "-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0") + codec + output.absolutePath
+        val lastUpdate = java.util.concurrent.atomic.AtomicLong()
+        val succeeded = runFfmpeg(args.toTypedArray()) { time ->
+            val now = SystemClock.elapsedRealtime()
+            val before = lastUpdate.get()
+            if (now - before >= 1_000 && lastUpdate.compareAndSet(before, now)) {
+                progress(time.coerceIn(0, range.lengthMs))
+            }
+        }
+        check(succeeded && recordingDuration(context, output, range.lengthMs) != null) {
+            "Download interrupted. Retry to resume from the last saved piece."
+        }
+    }
+
+    private suspend fun recordingDuration(context: Context, file: File, expected: Long): Long? {
+        if (!YouTubeDownloadValidation.isValidMp4(file)) return null
+        return try {
+            duration(context, Uri.fromFile(file)).takeIf { abs(it - expected) <= minOf(1500L, expected / 5) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) { null }
     }
 
     suspend fun join(context: Context, sections: List<SourcePart>): SourcePart = withContext(Dispatchers.IO) {
@@ -459,11 +531,11 @@ internal object StudioMedia {
         }
     }
 
-    private suspend fun runFfmpeg(arguments: Array<String>): Boolean {
+    private suspend fun runFfmpeg(arguments: Array<String>, progress: ((Long) -> Unit)? = null): Boolean {
         val done = CompletableDeferred<Boolean>()
-        val session = FFmpegKit.executeWithArgumentsAsync(arguments) { completed ->
+        val session = FFmpegKit.executeWithArgumentsAsync(arguments, { completed ->
             done.complete(ReturnCode.isSuccess(completed.returnCode))
-        }
+        }, null, if (progress == null) null else { stats -> progress(stats.time.toLong()) })
         return try {
             done.await()
         } catch (cancelled: CancellationException) {
