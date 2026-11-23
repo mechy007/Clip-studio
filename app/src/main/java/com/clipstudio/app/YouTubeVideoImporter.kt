@@ -6,6 +6,7 @@ import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.yausername.youtubedl_android.YoutubeDLException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import java.io.File
@@ -32,31 +33,39 @@ object YouTubeVideoImporter {
     internal suspend fun downloadSection(
         context: Context, link: String, format: String, range: RecordingPartWindow, directory: File,
         copyTracks: Boolean = false, progress: (Long) -> Unit
-    ): File = runInterruptible(Dispatchers.IO) {
-        val videoId = YouTubeLinkClassifier.parseVideoId(link)
-        val bounds = String.format(Locale.US, "*%.3f-%.3f", range.startMs / 1000.0, range.endMs / 1000.0)
-        val target = File(directory, "section.mp4")
-        prepare(context)
-        val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
-            .addOption("--no-playlist")
-            .addOption("--match-filter", "!is_live & !is_upcoming")
-            .addOption("--socket-timeout", 30)
-            .addOption("--retries", 2)
-            .addOption("-f", format)
-            .addOption("--download-sections", bounds)
-            .addOption("--merge-output-format", "mp4")
-            .addOption("-o", target.absolutePath)
-        if (copyTracks) {
-            request.addOption("--no-force-keyframes-at-cuts")
-                .addOption("--downloader-args", "ffmpeg_i:-rw_timeout 15000000")
-                .addOption("--downloader-args", "ffmpeg_o:-avoid_negative_ts disabled -use_editlist 1")
-        } else {
-            request.addOption("--force-keyframes-at-cuts")
+    ): File {
+        val processId = UUID.randomUUID().toString()
+        try {
+            return runInterruptible(Dispatchers.IO) {
+                val videoId = YouTubeLinkClassifier.parseVideoId(link)
+                val bounds = String.format(Locale.US, "*%.3f-%.3f", range.startMs / 1000.0, range.endMs / 1000.0)
+                val target = File(directory, "section.mp4")
+                prepare(context)
+                val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+                    .addOption("--no-playlist")
+                    .addOption("--match-filter", "!is_live & !is_upcoming")
+                    .addOption("--socket-timeout", 30)
+                    .addOption("--retries", 2)
+                    .addOption("-f", format)
+                    .addOption("--download-sections", bounds)
+                    .addOption("--merge-output-format", "mp4")
+                    .addOption("-o", target.absolutePath)
+                if (copyTracks) {
+                    request.addOption("--no-force-keyframes-at-cuts")
+                        .addOption("--downloader-args", "ffmpeg_i:-rw_timeout 15000000")
+                        .addOption("--downloader-args", "ffmpeg_o:-avoid_negative_ts disabled -use_editlist 1")
+                } else {
+                    request.addOption("--force-keyframes-at-cuts")
+                }
+                YoutubeDL.execute(request, processId, false) { percent, _, _ ->
+                    if (percent >= 0) progress((range.lengthMs * percent.toDouble().coerceIn(0.0, 95.0) / 100).toLong())
+                }
+                target
+            }
+        } catch (cancelled: CancellationException) {
+            runCatching { YoutubeDL.destroyProcessById(processId) }
+            throw cancelled
         }
-        YoutubeDL.execute(request, UUID.randomUUID().toString(), false) { percent, _, _ ->
-            if (percent >= 0) progress((range.lengthMs * percent.toDouble().coerceIn(0.0, 95.0) / 100).toLong())
-        }
-        target
     }
 
     suspend fun download(context: Context, url: String, height: Int, onProgress: (Int) -> Unit): Uri =

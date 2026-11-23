@@ -335,7 +335,7 @@ internal object StudioMedia {
         val files = GuidedDownloadFiles(directory)
         var recording: RecordingStreams? = null
         val savedPlan = files.load(startMs)
-        val plan = files.load(startMs, requestedEndMs) ?: run {
+        var plan = files.load(startMs, requestedEndMs) ?: run {
             val streams = resolveGuidedRecording(context, link, previousFormat)
             recording = streams
             val end = minOf(streams.endMs, requestedEndMs ?: streams.endMs)
@@ -356,9 +356,9 @@ internal object StudioMedia {
         val copied = if (tryFast) {
             val streams = recording ?: resolveGuidedRecording(context, link, plan.format).also { recording = it }
             check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
-            val resolvedPlan = plan.copy(format = streams.format)
-            files.save(resolvedPlan)
-            copyRecordingRange(context, link, resolvedPlan, files, progress)
+            plan = plan.copy(format = streams.format)
+            files.save(plan)
+            copyRecordingRange(context, link, plan, files, progress)
         } else false
         if (tryFast && !copied) progress(GuidedDownloadProgress(0, null, newAttempt = true))
         if (publishedDuration == null && !copied) {
@@ -384,7 +384,10 @@ internal object StudioMedia {
                     if (completed[index]) continue
                     currentCoroutineContext().ensureActive()
                     val streams = recording ?: resolveGuidedRecording(context, link, plan.format).also { recording = it }
-                    if (streams.format != plan.format) files.save(plan.copy(format = streams.format))
+                    if (streams.format != plan.format) {
+                        plan = plan.copy(format = streams.format)
+                        files.save(plan)
+                    }
                     check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
                     files.staging.delete()
                     val chunkBytes = chunk.lengthMs * 650L
