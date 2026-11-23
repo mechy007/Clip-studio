@@ -57,6 +57,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.CancellationException
@@ -73,7 +75,8 @@ private val Languages = listOf("Auto" to null, "English" to "en", "Malayalam" to
     "Hindi" to "hi", "Tamil" to "ta", "Spanish" to "es")
 
 private enum class EditorTool(val label: String) {
-    Layout("Layout"), Crop("Crop"), Captions("Captions"), Audio("Audio"), Export("Export")
+    // Keep the previous layout and crop keys for editor state restored after an app update.
+    Trim("Trim"), Layout("Frame"), Crop("Frame"), Captions("Captions"), Audio("Audio"), Export("Export")
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -111,7 +114,11 @@ internal fun ClipEditor(
     var showingPresets by rememberSaveable { mutableStateOf(false) }
     var waveform by remember { mutableStateOf<List<Float>?>(null) }
     var audioTracks by remember { mutableStateOf<Int?>(null) }
-    var fineFraming by rememberSaveable { mutableStateOf(false) }
+    var frameTools by rememberSaveable { mutableStateOf(false) }
+    var previewOptions by rememberSaveable { mutableStateOf(false) }
+    var preciseTrim by rememberSaveable { mutableStateOf(false) }
+    var captionAppearance by rememberSaveable { mutableStateOf(false) }
+    var exportOptions by rememberSaveable { mutableStateOf(false) }
     var preset by rememberSaveable { mutableStateOf(CaptionPreset.KARAOKE) }
     var captionPosition by rememberSaveable { mutableStateOf(CaptionPosition.LOWER) }
     var captionSize by rememberSaveable { mutableStateOf(100) }
@@ -121,9 +128,12 @@ internal fun ClipEditor(
     var captionEnabled by rememberSaveable { mutableStateOf(true) }
     var editCaptions by rememberSaveable { mutableStateOf(false) }
     var languageIndex by rememberSaveable { mutableStateOf(0) }
-    var tool by rememberSaveable { mutableStateOf(EditorTool.Layout) }
+    var tool by rememberSaveable { mutableStateOf(EditorTool.Trim) }
     var handledExportRequest by rememberSaveable { mutableStateOf(0) }
     val toolAnchor = remember { BringIntoViewRequester() }
+    val previewAnchor = remember { BringIntoViewRequester() }
+    val latestTrim by rememberUpdatedState(Triple(start, end, camera))
+    val cameraLocked by rememberUpdatedState(lockCamera)
     LaunchedEffect(exportRequest) {
         if (exportRequest != handledExportRequest) {
             handledExportRequest = exportRequest
@@ -143,6 +153,7 @@ internal fun ClipEditor(
             end = suggestedEnd
             frameAt = suggestedStart
             playing = false
+            tool = EditorTool.Trim
         }
         appliedSelection = momentSelection
     }
@@ -193,6 +204,7 @@ internal fun ClipEditor(
         showPreview = true
         StudioSession.preview(context, clip())
         notify()
+        scope.launch { previewAnchor.bringIntoView() }
     }
     val previewUri = state.playback?.takeIf { it.first == clip() }?.second
     val renderingPreview = Work.PREVIEW in state.jobs
@@ -210,32 +222,40 @@ internal fun ClipEditor(
             null
         }
     }
+    val activeTool = if (tool == EditorTool.Crop) EditorTool.Layout else tool
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(EditorTool.Trim, EditorTool.Layout, EditorTool.Captions, EditorTool.Audio).forEach { item ->
+            FilterChip(selected = activeTool == item, onClick = { tool = item }, label = { Text(item.label) })
+        }
+    }
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface)
+        Modifier.fillMaxWidth().bringIntoViewRequester(previewAnchor).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface)
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            FilterChip(selected = !live && !playing && !showPreview, onClick = {
-                live = false
-                playing = false
-                showPreview = false
-            }, label = { Text("Frame") })
-            FilterChip(selected = live, enabled = end > start, onClick = {
-                live = true
-                playing = false
-                showPreview = false
-            }, label = { Text("Live") })
-            FilterChip(selected = playing, onClick = {
-                live = false
-                playing = true
-                showPreview = false
-            }, label = { Text("Source") })
-            FilterChip(selected = showPreview, enabled = canPreviewEdit,
-                onClick = ::previewEdit, label = { Text("Edited") })
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                enabled = end > start, onClick = {
+                    val stop = live || playing || showPreview
+                    live = !stop
+                    playing = false
+                    showPreview = false
+                }
+            ) { Text(if (live || playing || showPreview) "Stop preview" else "Play clip") }
+            TextButton(onClick = { previewOptions = !previewOptions }) {
+                Text(if (previewOptions) "Hide options" else "Preview options")
+            }
+        }
+        if (previewOptions) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    live = false
+                    playing = true
+                    showPreview = false
+                }) { Text("Play source") }
+                OutlinedButton(enabled = canPreviewEdit, onClick = ::previewEdit) { Text("Preview export") }
+            }
         }
         if (showPreview && previewUri != null) {
             val (previewWidth, previewHeight) = layout.dimensions(540)
@@ -277,7 +297,7 @@ internal fun ClipEditor(
                     )
                 }
             }
-            Text("Live framing · see captions and audio effects in Edited",
+            Text("Live framing · use Preview export for captions and audio effects",
                 style = MaterialTheme.typography.bodySmall)
         } else if (playing) {
             key(part.uri, start) {
@@ -295,55 +315,9 @@ internal fun ClipEditor(
             }
         } else {
             FramingPreview(frame, layout, camera, gameplay, { if (!lockCamera) camera = it }, { if (!lockGame) gameplay = it })
-            if (layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) Text("Drag to reposition · pinch to zoom",
-                style = MaterialTheme.typography.bodySmall)
-        }
-    }
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-    ) {
-        Text("Trim · ${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}")
-        RangeSlider(
-            value = start.toFloat()..end.toFloat(), onValueChange = {
-                start = it.start.toLong()
-                end = it.endInclusive.toLong().coerceAtMost(part.durationMs)
-            },
-            onValueChangeFinished = { frameAt = start }, enabled = !busy,
-            valueRange = 0f..part.durationMs.toFloat()
-        )
-        val waveformData = waveform
-        if (waveformData == null) Text("Reading audio waveform…", style = MaterialTheme.typography.bodySmall)
-        else if (waveformData.isNotEmpty()) {
-            WaveformTimeline(waveformData, part.durationMs, start, end, frameAt, seek = { time ->
-                playing = false
-                showPreview = false
-                live = false
-                frameAt = time
-            }, onTrim = { first, last ->
-                start = first
-                end = last
-            }, onTrimFinished = {
-                playing = false
-                showPreview = false
-                frameAt = start
-            })
-        }
-        var scrub by remember(frameAt) { mutableStateOf(frameAt.toFloat()) }
-        Text("Playhead · ${timestamp(part.offsetMs + scrub.toLong())}", style = MaterialTheme.typography.bodySmall)
-        Slider(scrub, { scrub = it }, valueRange = 0f..part.durationMs.toFloat(), onValueChangeFinished = {
-            playing = false
-            showPreview = false
-            live = false
-            frameAt = scrub.toLong().coerceAtMost(part.durationMs - 1)
-        })
-    }
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        EditorTool.entries.forEach { item ->
-            FilterChip(selected = tool == item, onClick = { tool = item }, label = { Text(item.label) })
+            if (activeTool == EditorTool.Layout && layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
+                Text("Drag to reposition · pinch to zoom", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
     val canCaption = canRenderEdit && !generatingCaptions && end - start <= StudioAnalysis.MAX_CAPTION_DURATION_MS
@@ -353,11 +327,50 @@ internal fun ClipEditor(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         when (tool) {
-            EditorTool.Layout -> {
+            EditorTool.Trim -> {
+                Text("Trim clip", style = MaterialTheme.typography.titleMedium)
+                Text("${timestamp(part.offsetMs + start)} – ${timestamp(part.offsetMs + end)}",
+                    style = MaterialTheme.typography.bodyMedium)
+                RangeSlider(
+                    value = start.toFloat()..end.toFloat(), onValueChange = {
+                        start = it.start.toLong()
+                        end = it.endInclusive.toLong().coerceAtMost(part.durationMs)
+                    },
+                    onValueChangeFinished = { frameAt = start }, enabled = !busy,
+                    valueRange = 0f..part.durationMs.toFloat()
+                )
+                val waveformData = waveform
+                if (waveformData == null) Text("Reading audio waveform…", style = MaterialTheme.typography.bodySmall)
+                else if (waveformData.isNotEmpty()) {
+                    WaveformTimeline(waveformData, part.durationMs, start, end, frameAt, seek = { time ->
+                        playing = false
+                        showPreview = false
+                        live = false
+                        frameAt = time
+                    }, onTrim = { first, last ->
+                        start = first
+                        end = last
+                    }, onTrimFinished = {
+                        playing = false
+                        showPreview = false
+                        frameAt = start
+                    })
+                }
+                SettingsDisclosure("Playhead controls", preciseTrim, { preciseTrim = !preciseTrim }) {
+                    var scrub by remember(frameAt) { mutableStateOf(frameAt.toFloat()) }
+                    Text("Playhead · ${timestamp(part.offsetMs + scrub.toLong())}", style = MaterialTheme.typography.bodySmall)
+                    Slider(scrub, { scrub = it }, valueRange = 0f..part.durationMs.toFloat(), onValueChangeFinished = {
+                        playing = false
+                        showPreview = false
+                        live = false
+                        frameAt = scrub.toLong().coerceAtMost(part.durationMs - 1)
+                    })
+                }
+            }
+            EditorTool.Layout, EditorTool.Crop -> {
                 Text("Output layout", style = MaterialTheme.typography.titleMedium)
                 LayoutPicker(layout, !busy, StudioSession::changeLayout)
-                TextButton(onClick = { showingPresets = !showingPresets }) { Text("Creator presets") }
-                if (showingPresets) {
+                SettingsDisclosure("Creator presets", showingPresets, { showingPresets = !showingPresets }) {
                     state.library.presets.forEach { saved ->
                         OutlinedButton(onClick = {
                             StudioSession.changeLayout(saved.layout)
@@ -390,85 +403,78 @@ internal fun ClipEditor(
                     },
                     dismissButton = { TextButton(onClick = { savingPreset = false }) { Text("Cancel") } }
                 )
-            }
-            EditorTool.Crop -> {
-                if (layout == Layout.Fit || layout == Layout.Landscape) {
-                    Text("This layout fits the full source. Choose a fill or 50/50 layout to crop.")
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (layout == Layout.Split) {
-                        OutlinedButton(enabled = faceStatus != "Finding facecam…" && end > start && !busy && !lockCamera, onClick = {
-                            faceStatus = "Finding facecam…"
-                            scope.launch {
-                                try {
-                                    val suggested = StudioFraming.suggestFacecam(context, part, start, end)
-                                    if (suggested != null && !lockCamera) camera = suggested
-                                    faceStatus = if (suggested == null) "No consistent facecam found" else "Facecam framing updated"
-                                } catch (cancelled: CancellationException) {
-                                    throw cancelled
-                                } catch (_: Exception) {
-                                    faceStatus = "Facecam detection unavailable for this section"
-                                }
-                            }
-                        }) { Text("Find facecam") }
-                    }
-                }
-                if (layout == Layout.Split) {
-                    val expectedStart = start
-                    val expectedEnd = end
-                    val expectedCamera = camera
-                    val latestTrim by rememberUpdatedState(Triple(start, end, camera))
-                    val locked by rememberUpdatedState(lockCamera)
-                    OutlinedButton(enabled = !lockCamera && !busy && end - start >= 1000 &&
-                        faceStatus != "Tracking facecam…" && faceStatus != "Finding facecam…", onClick = {
-                        if (facePath.isNotEmpty()) {
-                            trackingOn = false
-                            faceStatus = "Facecam tracking off"
-                        } else if (tracking != null) {
-                            trackingOn = true
-                            faceStatus = "Reused facecam tracking"
-                        } else {
-                            faceStatus = "Tracking facecam…"
-                            scope.launch {
-                                try {
-                                    val tracked = StudioFraming.track(context, part, expectedStart, expectedEnd, expectedCamera)
-                                    if (latestTrim == Triple(expectedStart, expectedEnd, expectedCamera) && !locked) {
-                                        if (tracked.isNotEmpty()) {
-                                            StudioSession.rememberTracking(TrackingMemo(part, expectedStart, expectedEnd, expectedCamera, tracked))
-                                            trackingOn = true
+                if (layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
+                    SettingsDisclosure("Framing tools", frameTools, { frameTools = !frameTools }) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (layout == Layout.Split) {
+                                OutlinedButton(enabled = faceStatus != "Finding facecam…" && end > start && !busy && !lockCamera, onClick = {
+                                    faceStatus = "Finding facecam…"
+                                    scope.launch {
+                                        try {
+                                            val suggested = StudioFraming.suggestFacecam(context, part, start, end)
+                                            if (suggested != null && !lockCamera) camera = suggested
+                                            faceStatus = if (suggested == null) "No consistent facecam found" else "Facecam framing updated"
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (_: Exception) {
+                                            faceStatus = "Facecam detection unavailable for this section"
                                         }
-                                        faceStatus = if (tracked.isEmpty()) "No consistent facecam path found" else "Facecam path ready"
-                                    } else faceStatus = "Framing changed. Run tracking again."
-                                } catch (cancelled: CancellationException) { throw cancelled }
-                                catch (_: Exception) { faceStatus = "Facecam tracking unavailable for this section" }
+                                    }
+                                }) { Text("Find facecam") }
                             }
                         }
-                    }) { Text(if (facePath.isEmpty()) "Track facecam" else "Turn tracking off") }
-                }
-                if (faceStatus.isNotBlank()) Text(faceStatus)
-                if (layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { fineFraming = !fineFraming }) { Text(if (fineFraming) "Hide controls" else "Fine controls") }
-                        TextButton(onClick = { if (!lockCamera) camera = CameraDefault; if (!lockGame) gameplay = GameplayDefault }) { Text("Reset framing") }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (layout == Layout.Split) FilterChip(selected = lockCamera, onClick = { lockCamera = !lockCamera },
-                            label = { Text("Lock facecam") })
-                        FilterChip(selected = lockGame, onClick = { lockGame = !lockGame }, label = { Text("Lock gameplay") })
-                    }
-                    if (fineFraming) {
+                        if (layout == Layout.Split) {
+                            val expectedStart = start
+                            val expectedEnd = end
+                            val expectedCamera = camera
+                            OutlinedButton(enabled = !lockCamera && !busy && end - start >= 1000 &&
+                                faceStatus != "Tracking facecam…" && faceStatus != "Finding facecam…", onClick = {
+                                if (facePath.isNotEmpty()) {
+                                    trackingOn = false
+                                    faceStatus = "Facecam tracking off"
+                                } else if (tracking != null) {
+                                    trackingOn = true
+                                    faceStatus = "Reused facecam tracking"
+                                } else {
+                                    faceStatus = "Tracking facecam…"
+                                    scope.launch {
+                                        try {
+                                            val tracked = StudioFraming.track(context, part, expectedStart, expectedEnd, expectedCamera)
+                                            if (latestTrim == Triple(expectedStart, expectedEnd, expectedCamera) && !cameraLocked) {
+                                                if (tracked.isNotEmpty()) {
+                                                    StudioSession.rememberTracking(TrackingMemo(part, expectedStart, expectedEnd, expectedCamera, tracked))
+                                                    trackingOn = true
+                                                }
+                                                faceStatus = if (tracked.isEmpty()) "No consistent facecam path found" else "Facecam path ready"
+                                            } else faceStatus = "Framing changed. Run tracking again."
+                                        } catch (cancelled: CancellationException) { throw cancelled }
+                                        catch (_: Exception) { faceStatus = "Facecam tracking unavailable for this section" }
+                                    }
+                                }
+                            }) { Text(if (facePath.isEmpty()) "Track facecam" else "Turn tracking off") }
+                        }
+                        if (faceStatus.isNotBlank()) Text(faceStatus)
+                        TextButton(onClick = {
+                            if (!lockCamera) camera = CameraDefault
+                            if (!lockGame) gameplay = GameplayDefault
+                        }) { Text("Reset framing") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (layout == Layout.Split) FilterChip(selected = lockCamera, onClick = { lockCamera = !lockCamera },
+                                label = { Text("Lock facecam") })
+                            FilterChip(selected = lockGame, onClick = { lockGame = !lockGame }, label = { Text("Lock gameplay") })
+                        }
                         if (layout == Layout.Split && !lockCamera) FramingSliders("Facecam", camera) { camera = it }
                         if (!lockGame) FramingSliders("Gameplay", gameplay) { gameplay = it }
+                        if (layout == Layout.Split) originalSize?.let { (sourceWidth, sourceHeight) ->
+                            val (cropWidth, cropHeight) = facecamCropPixels(sourceWidth, sourceHeight, camera.zoom)
+                            val panelHeight = layout.dimensions(width).second / 2
+                            val enlarged = cropWidth < width || cropHeight < panelHeight
+                            Text("Facecam crop · ${cropWidth}×$cropHeight source pixels · ${width}×$panelHeight output",
+                                style = MaterialTheme.typography.bodySmall)
+                            if (enlarged) Text("The export enlarges this crop. Try a wider crop or a higher-resolution source for more detail.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
-                }
-                if (layout == Layout.Split) originalSize?.let { (sourceWidth, sourceHeight) ->
-                    val (cropWidth, cropHeight) = facecamCropPixels(sourceWidth, sourceHeight, camera.zoom)
-                    val panelHeight = layout.dimensions(width).second / 2
-                    val enlarged = cropWidth < width || cropHeight < panelHeight
-                    Text("Facecam crop · ${cropWidth}×$cropHeight source pixels · ${width}×$panelHeight output",
-                        style = MaterialTheme.typography.bodySmall)
-                    if (enlarged) Text("The export enlarges this crop. Try a wider crop or a higher-resolution source for more detail.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             EditorTool.Captions -> {
@@ -530,25 +536,27 @@ internal fun ClipEditor(
                             TextButton(onClick = { editCaptions = !editCaptions }) { Text(if (editCaptions) "Done" else "Edit text") }
                         }
                     }
-                    Text("Caption style", style = MaterialTheme.typography.titleSmall)
-                    val styles = listOf(CaptionPreset.CLEAN, CaptionPreset.KARAOKE, CaptionPreset.POP,
-                        CaptionPreset.BOUNCE, CaptionPreset.WIPE)
-                    styles.chunked(3).forEach { row ->
+                    Text("Caption size · $captionSize%", style = MaterialTheme.typography.titleSmall)
+                    Slider(captionSize.toFloat(), { captionSize = it.toInt() }, valueRange = 60f..150f, steps = 8)
+                    SettingsDisclosure("Style & position", captionAppearance, { captionAppearance = !captionAppearance }) {
+                        Text("Caption style", style = MaterialTheme.typography.titleSmall)
+                        val styles = listOf(CaptionPreset.CLEAN, CaptionPreset.KARAOKE, CaptionPreset.POP,
+                            CaptionPreset.BOUNCE, CaptionPreset.WIPE)
+                        styles.chunked(3).forEach { row ->
+                            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                row.forEach { item ->
+                                    FilterChip(selected = item == preset, onClick = { preset = item }, label = { Text(item.label) })
+                                }
+                            }
+                        }
+                        Text("Caption position", style = MaterialTheme.typography.titleSmall)
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            row.forEach { item ->
-                                FilterChip(selected = item == preset, onClick = { preset = item }, label = { Text(item.label) })
+                            CaptionPosition.entries.forEach { item ->
+                                FilterChip(selected = item == captionPosition, onClick = { captionPosition = item },
+                                    label = { Text(item.label) })
                             }
                         }
                     }
-                    Text("Caption position", style = MaterialTheme.typography.titleSmall)
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CaptionPosition.entries.forEach { item ->
-                            FilterChip(selected = item == captionPosition, onClick = { captionPosition = item },
-                                label = { Text(item.label) })
-                        }
-                    }
-                    Text("Caption size · $captionSize%", style = MaterialTheme.typography.titleSmall)
-                    Slider(captionSize.toFloat(), { captionSize = it.toInt() }, valueRange = 60f..150f, steps = 8)
                     if (!customCaptions && editCaptions) transcript.forEachIndexed { index, row ->
                         OutlinedTextField(
                             value = row.text, onValueChange = { StudioSession.editTranscript(part.uri, index, it) },
@@ -590,30 +598,16 @@ internal fun ClipEditor(
                     if (trackCount >= 2) {
                         FilterChip(selected = mix, onClick = { mix = !mix }, label = { Text("Mix first two audio tracks") })
                         if (mix) {
-                            Text("Track 1 · voice")
+                            Text("Track 1 volume")
                             Slider(voiceLevel, { voiceLevel = it })
-                            Text("Track 2 · gameplay")
+                            Text("Track 2 volume")
                             Slider(gameLevel, { gameLevel = it })
                         }
                     }
                 }
             }
             EditorTool.Export -> {
-                FilterChip(selected = fast, onClick = { fast = !fast }, label = { Text("Fast Export") })
-                if (fast) Text("Tries hardware H.264 at the selected resolution", style = MaterialTheme.typography.bodySmall)
-                FilterChip(selected = highDetail, onClick = { highDetail = !highDetail }, label = { Text("High detail") })
-                if (highDetail) Text("Higher bitrate preserves more detail and makes larger MP4 files.",
-                    style = MaterialTheme.typography.bodySmall)
-                val burnIn = captionEnabled && activeCues.isNotEmpty()
-                if (waitingForCaptions || burnIn) {
-                    Text(if (waitingForCaptions) "Waiting for captions…" else "${preset.label} captions will be burned into the MP4",
-                        style = MaterialTheme.typography.bodySmall)
-                }
-                OutlinedButton(enabled = canRenderEdit && !burnIn, onClick = {
-                    StudioSession.export(context, listOf(clip().copy(fastExport = true, originalFraming = true,
-                        captions = emptyList(), facePath = emptyList(), audio = AudioFinish(), muted = false)))
-                    notify()
-                }) { Text("Quick trim · no captions") }
+                Text("Export clip", style = MaterialTheme.typography.titleMedium)
                 Text("Output resolution", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(720, 1080, 1440).forEach {
@@ -622,10 +616,9 @@ internal fun ClipEditor(
                 }
                 if (width == 1440) Text("Larger files and longer renders. Choose this for high-resolution recordings.",
                     style = MaterialTheme.typography.bodySmall)
-                if (layout == Layout.Split) {
-                    FilterChip(selected = enhanceFacecam, onClick = { enhanceFacecam = !enhanceFacecam },
-                        label = { Text("Enhance facecam") })
-                    Text("Sharpens edges in the facecam panel. Open Edited to review the effect.",
+                val burnIn = captionEnabled && activeCues.isNotEmpty()
+                if (waitingForCaptions || burnIn) {
+                    Text(if (waitingForCaptions) "Waiting for captions…" else "${preset.label} captions will be burned into the MP4",
                         style = MaterialTheme.typography.bodySmall)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -637,8 +630,44 @@ internal fun ClipEditor(
                         Text("Add to queue")
                     }
                 }
+                SettingsDisclosure("More export settings", exportOptions, { exportOptions = !exportOptions }) {
+                    FilterChip(selected = fast, onClick = { fast = !fast }, label = { Text("Fast Export") })
+                    if (fast) Text("Tries hardware H.264 at the selected resolution", style = MaterialTheme.typography.bodySmall)
+                    FilterChip(selected = highDetail, onClick = { highDetail = !highDetail }, label = { Text("High detail") })
+                    if (highDetail) Text("Higher bitrate preserves more detail and makes larger MP4 files.",
+                        style = MaterialTheme.typography.bodySmall)
+                    if (layout == Layout.Split) {
+                        FilterChip(selected = enhanceFacecam, onClick = { enhanceFacecam = !enhanceFacecam },
+                            label = { Text("Enhance facecam") })
+                        Text("Sharpens edges in the facecam panel. Use Preview export to review the effect.",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                    OutlinedButton(enabled = canRenderEdit && !burnIn, onClick = {
+                        StudioSession.export(context, listOf(clip().copy(fastExport = true, originalFraming = true,
+                            captions = emptyList(), facePath = emptyList(), audio = AudioFinish(), muted = false)))
+                        notify()
+                    }) { Text("Quick trim · no captions") }
+                }
             }
         }
+    }
+}
+
+@Composable
+internal fun SettingsDisclosure(
+    label: String, expanded: Boolean, toggle: () -> Unit, content: @Composable () -> Unit
+) {
+    TextButton(
+        onClick = toggle,
+        modifier = Modifier.fillMaxWidth().semantics {
+            stateDescription = if (expanded) "Expanded" else "Collapsed"
+        }
+    ) {
+        Text(label, Modifier.weight(1f))
+        Text(if (expanded) "−" else "+")
+    }
+    if (expanded) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { content() }
     }
 }
 

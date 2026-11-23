@@ -219,14 +219,19 @@ class MainActivity : ComponentActivity() {
                     when (tab) {
                         StudioTab.Import -> {
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text("From your phone", style = MaterialTheme.typography.titleMedium)
+                                    OutlinedButton(enabled = !occupied, modifier = Modifier.fillMaxWidth(),
+                                        onClick = { picker.launch(arrayOf("video/*")) }) { Text("Choose video") }
+                                }
+                            }
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text("YouTube recording link", style = MaterialTheme.typography.titleLarge)
+                                    Text("From YouTube", style = MaterialTheme.typography.titleMedium)
                                     OutlinedTextField(
                                         value = link, onValueChange = { link = it }, singleLine = true,
                                         enabled = !occupied, label = { Text("YouTube recording URL") }, modifier = Modifier.fillMaxWidth()
                                     )
-                                    Text("Starting layout", style = MaterialTheme.typography.labelLarge)
-                                    LayoutPicker(incomingLayout, !occupied) { incomingLayout = it }
                                     Button(
                                         enabled = !occupied && YouTubeLinkClassifier.isYouTubeUrl(link),
                                         modifier = Modifier.fillMaxWidth(),
@@ -237,9 +242,12 @@ class MainActivity : ComponentActivity() {
                                             showNotificationPermission()
                                         }
                                     ) { Text("Import & find highlights") }
-                                    OutlinedButton(enabled = !occupied, modifier = Modifier.fillMaxWidth(),
-                                        onClick = { picker.launch(arrayOf("video/*")) }) { Text("Open a video from your phone") }
                                 }
+                            }
+                            var importSettings by rememberSaveable { mutableStateOf(false) }
+                            SettingsDisclosure("Starting layout · ${incomingLayout.label}", importSettings,
+                                { importSettings = !importSettings }) {
+                                LayoutPicker(incomingLayout, !occupied) { incomingLayout = it }
                             }
                             if (occupied) {
                                 state.jobs.forEach { (work, label) ->
@@ -337,25 +345,29 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         StudioTab.Projects -> {
-                            Text("Saved projects", style = MaterialTheme.typography.titleLarge)
-                            if (state.library.projects.isEmpty()) Text("Imported recordings will appear here.")
-                            state.library.projects.forEach { item ->
-                                Card(
-                                    onClick = {
-                                        if (project?.id != item.id) {
-                                            selectedPart = null
-                                            chosenMoment = -1L
-                                            incomingLayout = item.layout
-                                            StudioSession.openProject(item.id)
+                            Text("Projects", style = MaterialTheme.typography.titleLarge)
+                            var savedProjectsOpen by rememberSaveable { mutableStateOf(false) }
+                            SettingsDisclosure("Saved projects · ${state.library.projects.size}", savedProjectsOpen,
+                                { savedProjectsOpen = !savedProjectsOpen }) {
+                                if (state.library.projects.isEmpty()) Text("Imported recordings will appear here.")
+                                state.library.projects.forEach { item ->
+                                    Card(
+                                        onClick = {
+                                            if (project?.id != item.id) {
+                                                selectedPart = null
+                                                chosenMoment = -1L
+                                                incomingLayout = item.layout
+                                                StudioSession.openProject(item.id)
+                                            }
+                                            tab = StudioTab.Editor
+                                        },
+                                        enabled = !occupied, modifier = Modifier.fillMaxWidth(),
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                    ) {
+                                        Column(Modifier.padding(14.dp)) {
+                                            Text(item.name, style = MaterialTheme.typography.titleMedium)
+                                            Text("${item.exports.size} exports", style = MaterialTheme.typography.labelMedium)
                                         }
-                                        tab = StudioTab.Editor
-                                    },
-                                    enabled = !occupied, modifier = Modifier.fillMaxWidth(),
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                                ) {
-                                    Column(Modifier.padding(14.dp)) {
-                                        Text(item.name, style = MaterialTheme.typography.titleMedium)
-                                        Text("${item.exports.size} exports", style = MaterialTheme.typography.labelMedium)
                                     }
                                 }
                             }
