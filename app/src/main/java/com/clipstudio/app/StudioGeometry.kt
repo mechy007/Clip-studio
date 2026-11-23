@@ -41,7 +41,7 @@ internal fun trackingCoordinate(points: List<FacePoint>, fallback: Float, coordi
 }
 
 internal fun videoFilter(
-    layout: Layout, camera: Crop, game: Crop, resolution: Int = 1080, facePath: List<FacePoint> = emptyList()
+    layout: Layout, camera: Crop, game: Crop, resolution: Int = 1080, facePath: List<FacePoint> = emptyList(), enhanceFacecam: Boolean = false
 ): String {
     val (outputWidth, outputHeight) = layout.dimensions(resolution)
     val panelHeight = outputHeight / 2
@@ -57,8 +57,9 @@ internal fun videoFilter(
         return "crop=w='$w':h='$h':x='(iw-ow)*$x':y='(ih-oh)*$y'," +
             "scale=$width:$height$scaleFlags,setsar=1"
     }
+    val clarity = if (enhanceFacecam) ",unsharp=lx=5:ly=5:la=0.45:ca=0" else ""
     return when (layout) {
-        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera, facePath, ":flags=lanczos")}[top];" +
+        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera, facePath, ":flags=lanczos")}$clarity[top];" +
             "[b]${fill(outputWidth, panelHeight, game)}[bottom];[top][bottom]vstack[out]"
         Layout.Fill, Layout.Square -> "[0:v]${fill(outputWidth, outputHeight, game)}[out]"
         Layout.Fit, Layout.Landscape -> "[0:v]scale=$outputWidth:$outputHeight:force_original_aspect_ratio=decrease:" +

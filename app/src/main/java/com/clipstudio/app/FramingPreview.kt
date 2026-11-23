@@ -42,7 +42,7 @@ internal fun FramingPreview(
             Text("Loading preview frame…", modifier = Modifier.heightIn(min = 90.dp))
         } else {
             Canvas(
-                Modifier.heightIn(max = 380.dp).aspectRatio(aspect, matchHeightConstraintsFirst = layout != Layout.Landscape)
+                Modifier.heightIn(max = 286.dp).aspectRatio(aspect, matchHeightConstraintsFirst = layout != Layout.Landscape)
                     .background(Color(0xFF0D1015))
                     .then(framingGestures(layout, image.width, image.height, camera, game, onCamera, onGame))
             ) {
