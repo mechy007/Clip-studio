@@ -24,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.net.URI
 import java.util.Locale
@@ -201,17 +202,67 @@ internal object StudioMedia {
         return RecordingStreams(durationMs, selectedFormat, inputs)
     }
 
+    internal fun guidedFullFile(context: Context, projectId: String): File =
+        File(guidedDirectory(context, projectId), "full.mp4")
+
+    private fun guidedDirectory(context: Context, projectId: String): File =
+        File(context.filesDir, "imports/guided/${UUID.fromString(projectId)}")
+
+    /** Use the standard full downloader once, then prepare one local range at a time. */
+    suspend fun preparePartFromFull(
+        context: Context, projectId: String, link: String, startMs: Long,
+        downloading: (Int) -> Unit, cutting: (Int) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val source = guidedFullFile(context, projectId)
+        if (!YouTubeDownloadValidation.isValidMp4(source)) {
+            check(source.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "Could not create download storage." }
+            downloading(0)
+            val downloaded = YouTubeVideoImporter.download(context, link, 1080, downloading)
+            val file = File(requireNotNull(downloaded.path))
+            check(file.renameTo(source)) {
+                file.delete()
+                "Could not save the full recording for local clipping."
+            }
+        }
+        val durationMs = duration(context, Uri.fromFile(source))
+        val range = nextRecordingPart(startMs, durationMs) ?: return@withContext
+        val directory = File(guidedDirectory(context, projectId), startMs.toString())
+        check(directory.isDirectory || directory.mkdirs()) { "Could not create part storage." }
+        val output = File(directory, "from-full.mp4")
+        var actual = recordingDuration(context, output, range.lengthMs)
+        if (actual == null) {
+            val staging = File(directory, "preparing-full-part.mp4")
+            cutting(0)
+            try {
+                check(encodeRecordingChunk(context, listOf(MediaStream(source.absolutePath, "")),
+                    range.startMs, range.lengthMs, staging, remote = false) { time ->
+                    cutting((100.0 * time / range.lengthMs).toInt().coerceIn(0, 99))
+                }) { "The full recording downloaded, but this part could not be prepared. Retry to use the saved recording." }
+                actual = duration(context, Uri.fromFile(staging))
+                check(staging.renameTo(output)) { "Could not save this part." }
+            } finally {
+                staging.delete()
+            }
+        }
+        val part = SourcePart(Uri.fromFile(output), range.startMs, requireNotNull(actual), range.endMs)
+        currentCoroutineContext().ensureActive()
+        withContext(NonCancellable) { publish(part, range.endMs == durationMs) }
+    }
+
+    private suspend fun resolveGuidedRecording(context: Context, link: String, previousFormat: String?): RecordingStreams =
+        withTimeoutOrNull(60_000) { resolveRecording(context, link, previousFormat) }
+            ?: error("The part downloader did not start. Use Download full video first to prepare parts locally.")
+
     /** Commit each short piece locally so a retry does not fetch completed pieces again. */
     suspend fun downloadRecordingPart(
         context: Context, projectId: String, link: String, startMs: Long, previousFormat: String?,
         progress: (GuidedDownloadProgress) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
     ) = withContext(Dispatchers.IO) {
-        val projectKey = UUID.fromString(projectId).toString()
-        val directory = File(context.filesDir, "imports/guided/$projectKey/$startMs")
+        val directory = File(guidedDirectory(context, projectId), startMs.toString())
         val files = GuidedDownloadFiles(directory)
         var recording: RecordingStreams? = null
         val plan = files.load(startMs) ?: run {
-            val streams = resolveRecording(context, link, previousFormat)
+            val streams = resolveGuidedRecording(context, link, previousFormat)
             recording = streams
             val range = nextRecordingPart(startMs, streams.endMs) ?: return@withContext
             check(directory.isDirectory || directory.mkdirs()) { "Could not create download storage." }
@@ -237,7 +288,7 @@ internal object StudioMedia {
                 for ((index, chunk) in chunks.withIndex()) {
                     if (completed[index]) continue
                     currentCoroutineContext().ensureActive()
-                    val streams = recording ?: resolveRecording(context, link, plan.format).also { recording = it }
+                    val streams = recording ?: resolveGuidedRecording(context, link, plan.format).also { recording = it }
                     check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
                     files.staging.delete()
                     val beforeChunk = processed
@@ -323,7 +374,7 @@ internal object StudioMedia {
         val args = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + listOf("-t", seconds(lengthMs),
             "-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0") + codec + output.absolutePath
         val lastUpdate = java.util.concurrent.atomic.AtomicLong()
-        val succeeded = runFfmpeg(args.toTypedArray()) { time ->
+        val succeeded = runFfmpeg(args.toTypedArray(), idleTimeoutMs = if (remote) 45_000L else null) { time ->
             val now = SystemClock.elapsedRealtime()
             val before = lastUpdate.get()
             if (now - before >= 1_000 && lastUpdate.compareAndSet(before, now)) {
@@ -582,13 +633,34 @@ internal object StudioMedia {
         }
     }
 
-    private suspend fun runFfmpeg(arguments: Array<String>, progress: ((Long) -> Unit)? = null): Boolean {
+    private suspend fun runFfmpeg(
+        arguments: Array<String>, idleTimeoutMs: Long? = null, progress: ((Long) -> Unit)? = null
+    ): Boolean {
         val done = CompletableDeferred<Boolean>()
+        val lastAdvance = java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime())
+        val lastTime = java.util.concurrent.atomic.AtomicLong(0)
         val session = FFmpegKit.executeWithArgumentsAsync(arguments, { completed ->
             done.complete(ReturnCode.isSuccess(completed.returnCode))
-        }, null, if (progress == null) null else { stats -> progress(stats.time.toLong()) })
+        }, null, if (progress == null) null else { stats ->
+            val time = stats.time.toLong()
+            if (time > lastTime.getAndUpdate { previous -> maxOf(previous, time) }) {
+                lastAdvance.set(SystemClock.elapsedRealtime())
+            }
+            progress(time)
+        })
         return try {
-            done.await()
+            if (idleTimeoutMs == null) done.await() else {
+                while (!done.isCompleted) {
+                    val remaining = idleTimeoutMs - (SystemClock.elapsedRealtime() - lastAdvance.get())
+                    if (remaining <= 0) {
+                        FFmpegKit.cancel(session.sessionId)
+                        done.await()
+                        return false
+                    }
+                    withTimeoutOrNull(remaining) { done.await() }?.let { return it }
+                }
+                done.await()
+            }
         } catch (cancelled: CancellationException) {
             FFmpegKit.cancel(session.sessionId)
             withContext(NonCancellable) { done.await() }

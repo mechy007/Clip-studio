@@ -102,7 +102,12 @@ internal object StudioSession {
             }
             for (library in saves) {
                 try {
-                    withContext(Dispatchers.IO) { store.save(library) }
+                    withContext(Dispatchers.IO) {
+                        store.save(library)
+                        library.projects.filter { it.guidedFromFull && it.importComplete }.forEach {
+                            runCatching { StudioMedia.guidedFullFile(app, it.id).delete() }
+                        }
+                    }
                     update { it.copy(persistedDrafts = library.projects.associate { project -> project.id to project.drafts }) }
                 } catch (_: java.io.IOException) {
                     update { it.copy(status = "Could not save the project. You can still export clips.") }
@@ -120,18 +125,24 @@ internal object StudioSession {
             status("Video ready")
         }
 
-    fun importYouTube(context: Context, link: String, layout: Layout, guided: Boolean = false, startMs: Long = 0) =
+    fun importYouTube(
+        context: Context, link: String, layout: Layout, guided: Boolean = false, startMs: Long = 0,
+        fromFull: Boolean = false
+    ) =
         work(context, Work.IMPORT, "Opening YouTube recording") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
-            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided, startMs)
+            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided, startMs, fromFull)
             if (guided) importGuidedPart(app) else importRecording(app, link)
         }
 
-    fun resume(context: Context) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
+    fun resume(context: Context, useFullDownload: Boolean = false) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
         val project = state.value.project ?: return@work
         val link = project.youtubeLink ?: return@work
         if (!project.importComplete) {
-            if (project.guidedImport) importGuidedPart(app) else importRecording(app, link)
+            if (project.guidedImport) {
+                if (useFullDownload && !project.guidedFromFull) save(project.copy(guidedFromFull = true))
+                importGuidedPart(app)
+            } else importRecording(app, link)
         }
     }
 
@@ -143,26 +154,46 @@ internal object StudioSession {
         describe(Work.IMPORT, "Preparing part $partNumber")
         val activeImport = jobs[Work.IMPORT]
         var downloaded = false
-        StudioMedia.downloadRecordingPart(app, project.id, link, previous?.nextOffsetMs ?: project.guidedStartMs,
-            previous?.formatId, progress = { progress ->
-                scope.launch {
-                    if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
-                    val current = state.value.guidedDownload
-                    if (current?.assembling == true || progress.percent < (current?.percent ?: 0)) return@launch
-                    val label = if (progress.assembling) "Assembling part $partNumber" else buildString {
-                        append("Downloading part $partNumber · ${progress.percent}%")
-                        progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
-                    }
-                    update { it.copy(guidedDownload = progress, jobs = it.jobs + (Work.IMPORT to label)) }
-                }
-            }) { part, last ->
+        val start = previous?.nextOffsetMs ?: project.guidedStartMs
+        val publish: suspend (SourcePart, Boolean) -> Unit = { part, last ->
             withContext(Dispatchers.Main.immediate) {
                 addPart(app, part)
                 if (last) state.value.project?.let { save(it.copy(importComplete = true)) }
                 update { it.copy(guidedPart = part) }
-                status(if (last) "Final part ready to clip" else "Part $partNumber ready. Download paused.")
+                status(when {
+                    last -> "Final part ready to clip"
+                    project.guidedFromFull -> "Part $partNumber ready. Next part uses the saved recording."
+                    else -> "Part $partNumber ready. Download paused."
+                })
                 downloaded = true
             }
+        }
+        if (project.guidedFromFull) {
+            fun report(label: String, percent: Int) {
+                scope.launch {
+                    if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
+                    update { it.copy(guidedDownload = GuidedDownloadProgress(percent, null),
+                        jobs = it.jobs + (Work.IMPORT to "$label · $percent%")) }
+                }
+            }
+            StudioMedia.preparePartFromFull(app, project.id, link, start,
+                downloading = { report("Downloading full video", it) },
+                cutting = { report("Preparing part $partNumber from saved video", it) },
+                publish = publish)
+        } else {
+            StudioMedia.downloadRecordingPart(app, project.id, link, start,
+                previous?.formatId, progress = { progress ->
+                    scope.launch {
+                        if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true) return@launch
+                        val current = state.value.guidedDownload
+                        if (current?.assembling == true || progress.percent < (current?.percent ?: 0)) return@launch
+                        val label = if (progress.assembling) "Assembling part $partNumber" else buildString {
+                            append("Downloading part $partNumber · ${progress.percent}%")
+                            progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
+                        }
+                        update { it.copy(guidedDownload = progress, jobs = it.jobs + (Work.IMPORT to label)) }
+                    }
+                }, publish = publish)
         }
         if (!downloaded) {
             check(previous != null) { "The start time must be before the end of the recording." }
@@ -482,12 +513,14 @@ internal object StudioSession {
     }
 
     private fun newProject(
-        name: String, layout: Layout, link: String? = null, guided: Boolean = false, startMs: Long = 0
+        name: String, layout: Layout, link: String? = null, guided: Boolean = false, startMs: Long = 0,
+        fromFull: Boolean = false
     ) {
         autoAnalyze = true
         clearPlayback()
         update { it.copy(exports = emptyList(), transcripts = emptyMap(), joined = null, guidedPart = null, status = "") }
-        save(StudioProject(name, layout, emptyList(), youtubeLink = link, guidedImport = guided, guidedStartMs = startMs))
+        save(StudioProject(name, layout, emptyList(), youtubeLink = link, guidedImport = guided,
+            guidedStartMs = startMs, guidedFromFull = guided && fromFull))
     }
 
     private fun save(project: StudioProject) {

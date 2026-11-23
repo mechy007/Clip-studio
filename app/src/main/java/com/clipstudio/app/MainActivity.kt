@@ -109,6 +109,7 @@ class MainActivity : ComponentActivity() {
         val pages = rememberSaveableStateHolder()
         var link by rememberSaveable { mutableStateOf("") }
         var guidedImport by rememberSaveable { mutableStateOf(false) }
+        var downloadFullFirst by rememberSaveable { mutableStateOf(false) }
         var recordingStart by rememberSaveable { mutableStateOf("") }
         val startMs = recordingStartMs(recordingStart)
         var seenGuidedPart by rememberSaveable { mutableStateOf<String?>(null) }
@@ -317,6 +318,11 @@ class MainActivity : ComponentActivity() {
                                     FilterChip(selected = guidedImport, enabled = !occupied,
                                         onClick = { guidedImport = !guidedImport }, label = { Text("30-minute parts") })
                                     if (guidedImport) {
+                                        FilterChip(selected = downloadFullFirst, enabled = !occupied,
+                                            onClick = { downloadFullFirst = !downloadFullFirst },
+                                            label = { Text("Download full video first") })
+                                        if (downloadFullFirst) Text("Downloads the whole recording once, then prepares each part on this phone.",
+                                            style = MaterialTheme.typography.bodySmall)
                                         OutlinedTextField(
                                             value = recordingStart, onValueChange = { recordingStart = it.take(16) },
                                             enabled = !occupied, singleLine = true, isError = startMs == null,
@@ -333,10 +339,14 @@ class MainActivity : ComponentActivity() {
                                             selectedPart = null
                                             chosenMoment = -1L
                                             StudioSession.importYouTube(this@MainActivity, link.trim(), incomingLayout, guidedImport,
-                                                if (guidedImport) startMs ?: 0L else 0L)
+                                                if (guidedImport) startMs ?: 0L else 0L, fromFull = downloadFullFirst)
                                             showNotificationPermission()
                                         }
-                                    ) { Text(if (guidedImport) "Download part 1" else "Import & find highlights") }
+                                    ) { Text(when {
+                                        guidedImport && downloadFullFirst -> "Download full video for parts"
+                                        guidedImport -> "Download part 1"
+                                        else -> "Import & find highlights"
+                                    }) }
                                 }
                             }
                             var importSettings by rememberSaveable { mutableStateOf(false) }
@@ -355,6 +365,14 @@ class MainActivity : ComponentActivity() {
                             if (guidedPending) {
                                 OutlinedButton(enabled = canDownloadPart, onClick = ::downloadNextPart) {
                                     Text("Download part $nextPartNumber")
+                                }
+                                if (project?.guidedFromFull == false) {
+                                    OutlinedButton(enabled = canDownloadPart, onClick = {
+                                        StudioSession.resume(this@MainActivity, useFullDownload = true)
+                                        showNotificationPermission()
+                                    }) { Text("Download full video first") }
+                                    Text("If a part stalls, this downloads the full recording once and prepares the remaining parts locally.",
+                                        style = MaterialTheme.typography.bodySmall)
                                 }
                             } else if (project?.youtubeLink != null && !project.importComplete && Work.IMPORT !in state.jobs) {
                                 OutlinedButton(onClick = {

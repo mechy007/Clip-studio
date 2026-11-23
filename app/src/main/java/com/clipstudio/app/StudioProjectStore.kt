@@ -23,7 +23,8 @@ internal data class StudioProject(
     val drafts: Map<String, ClipDraft> = emptyMap(),
     val exportedParts: Set<Uri> = emptySet(),
     val framing: ProjectFraming? = null,
-    val bookmarks: Map<Uri, List<Long>> = emptyMap()
+    val bookmarks: Map<Uri, List<Long>> = emptyMap(),
+    val guidedFromFull: Boolean = false
 ) {
     val availableParts: List<PartReview> get() = parts.filterNot { it.released }
 
@@ -151,7 +152,7 @@ internal class StudioProjectStore(context: Context) {
             root.optString("id", UUID.randomUUID().toString()),
             root.optString("youtube", "").takeIf { it.isNotEmpty() },
             root.optBoolean("complete"), HighlightMode.valueOf(root.optString("mode", HighlightMode.BALANCED.name)),
-            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, guided, root.optLong("guidedStartMs"), drafts, exportedParts, framing, bookmarks)
+            (0 until exports.length()).map { Uri.parse(exports.getString(it)) }, renderStats, guided, root.optLong("guidedStartMs"), drafts, exportedParts, framing, bookmarks, root.optBoolean("guidedFromFull"))
     }
 
     fun save(library: StudioLibrary) {
@@ -196,7 +197,7 @@ internal class StudioProjectStore(context: Context) {
             .put("mode", project.mode.name).put("exports", JSONArray(project.exports.map(Uri::toString))).put("renderStats", timings)
             .put("parts", rows).put("queue", queue).put("guidedImport", project.guidedImport)
             .put("exportedParts", JSONArray(project.exportedParts.map(Uri::toString)))
-            .put("guidedStartMs", project.guidedStartMs)
+            .put("guidedStartMs", project.guidedStartMs).put("guidedFromFull", project.guidedFromFull)
             .put("drafts", JSONArray(project.drafts.map { (id, draft) -> draft.json().put("id", id) }))
             .put("framing", project.framing?.let {
                 JSONObject().put("layout", it.layout.name).put("camera", it.camera.json()).put("gameplay", it.gameplay.json())
