@@ -45,7 +45,9 @@ internal fun videoFilter(
 ): String {
     val (outputWidth, outputHeight) = layout.dimensions(resolution)
     val panelHeight = outputHeight / 2
-    fun fill(width: Int, height: Int, crop: Crop, path: List<FacePoint> = emptyList()): String {
+    fun fill(
+        width: Int, height: Int, crop: Crop, path: List<FacePoint> = emptyList(), scaleFlags: String = ""
+    ): String {
         val ratio = "$width/$height"
         val zoom = crop.zoom.coerceIn(1f, 4f)
         val x = trackingCoordinate(path, crop.x) { it.x }
@@ -53,10 +55,10 @@ internal fun videoFilter(
         val w = "max(2,trunc(min(iw,ih*$ratio)/$zoom/2)*2)"
         val h = "max(2,trunc(min(ih,iw/($ratio))/$zoom/2)*2)"
         return "crop=w='$w':h='$h':x='(iw-ow)*$x':y='(ih-oh)*$y'," +
-            "scale=$width:$height,setsar=1"
+            "scale=$width:$height$scaleFlags,setsar=1"
     }
     return when (layout) {
-        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera, facePath)}[top];" +
+        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera, facePath, ":flags=lanczos")}[top];" +
             "[b]${fill(outputWidth, panelHeight, game)}[bottom];[top][bottom]vstack[out]"
         Layout.Fill, Layout.Square -> "[0:v]${fill(outputWidth, outputHeight, game)}[out]"
         Layout.Fit, Layout.Landscape -> "[0:v]scale=$outputWidth:$outputHeight:force_original_aspect_ratio=decrease:" +
@@ -81,4 +83,10 @@ internal fun cropWindow(imageWidth: Int, imageHeight: Int, aspect: Float, crop: 
         ((imageHeight - height) * crop.y.coerceIn(0f, 1f)).toInt(),
         width, height
     )
+}
+
+internal fun facecamCropPixels(sourceWidth: Int, sourceHeight: Int, zoom: Float): Pair<Int, Int> {
+    val window = cropWindow(sourceWidth, sourceHeight, 1080f / 960f, Crop(0f, 0f, zoom.coerceIn(1f, 4f)))
+    fun even(value: Int) = (value / 2 * 2).coerceAtLeast(2)
+    return even(window.width) to even(window.height)
 }

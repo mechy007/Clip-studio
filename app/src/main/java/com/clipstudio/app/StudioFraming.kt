@@ -14,11 +14,27 @@ import kotlinx.coroutines.withContext
 import kotlin.math.hypot
 
 internal object StudioFraming {
-    suspend fun frame(context: Context, uri: Uri, atMs: Long): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun frame(context: Context, uri: Uri, atMs: Long, maxEdge: Int = 960): Bitmap? = withContext(Dispatchers.IO) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, uri)
-            retriever.getScaledFrameAtTime(atMs * 1_000, MediaMetadataRetriever.OPTION_CLOSEST, 960, 960)
+            retriever.getScaledFrameAtTime(atMs * 1_000, MediaMetadataRetriever.OPTION_CLOSEST, maxEdge, maxEdge)
+        } finally {
+            retriever.release()
+        }
+    }
+
+    suspend fun sourceDimensions(context: Context, uri: Uri): Pair<Int, Int>? = withContext(Dispatchers.IO) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull()
+            if (width == null || height == null || width < 2 || height < 2) null
+            else if (rotation == 90 || rotation == 270) height to width else width to height
+        } catch (_: RuntimeException) {
+            null
         } finally {
             retriever.release()
         }
