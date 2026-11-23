@@ -27,9 +27,9 @@ internal data class StudioState(
     val jobs: Map<Work, String> = emptyMap(),
     val status: String = "",
     val exports: List<Uri> = emptyList(),
-    val transcripts: Map<Uri, CaptionMemo> = emptyMap(),
+    val transcripts: Map<String, CaptionMemo> = emptyMap(),
     val library: StudioLibrary = StudioLibrary(),
-    val persistedDrafts: Map<String, Map<Uri, ClipDraft>> = emptyMap(),
+    val persistedDrafts: Map<String, Map<String, ClipDraft>> = emptyMap(),
     val joined: SourcePart? = null,
     val joinRevision: Long = 0,
     val guidedPart: SourcePart? = null,
@@ -55,7 +55,8 @@ internal data class ExportClip(
     val fastExport: Boolean = false, val originalFraming: Boolean = false, val highDetail: Boolean = false,
     val enhanceFacecam: Boolean = false,
     val captionPosition: CaptionPosition = CaptionPosition.LOWER,
-    val captionSize: Int = 100
+    val captionSize: Int = 100,
+    val enhancement: VideoEnhancement = VideoEnhancement.OFF
 )
 
 internal object StudioSession {
@@ -246,19 +247,19 @@ internal object StudioSession {
     }
 
     fun captions(
-        context: Context, part: SourcePart, start: Long, end: Long, language: String?, audioTrack: Int
+        context: Context, draftId: String, part: SourcePart, start: Long, end: Long, language: String?, audioTrack: Int
     ) = work(context, Work.CAPTIONS, "Generating captions from audio track ${audioTrack + 1}") { app ->
         val projectId = state.value.project?.id ?: return@work
         val cached = captionMemos.lastOrNull { it.covers(part, start, end, language, audioTrack) }
         val memo = cached ?: CaptionMemo(part, start, end, language,
             StudioAnalysis.captions(app, part, start, end, language, audioTrack), audioTrack).also(::rememberCaptions)
         updateProject(projectId) { owner ->
-            val draft = owner.drafts[part.uri] ?: return@updateProject owner
-            owner.copy(drafts = owner.drafts + (part.uri to draft.copy(transcript = memo)))
+            val draft = owner.drafts[draftId] ?: return@updateProject owner
+            owner.copy(drafts = owner.drafts + (draftId to draft.copy(transcript = memo)))
         }
         if (projectId != state.value.project?.id) return@work
         update {
-            val recent = (it.transcripts - part.uri + (part.uri to memo)).toList().takeLast(24).toMap()
+            val recent = (it.transcripts - draftId + (draftId to memo)).toList().takeLast(24).toMap()
             it.copy(transcripts = recent)
         }
         status(when {
@@ -328,10 +329,10 @@ internal object StudioSession {
                 updateProject(project.id) { owner ->
                     owner.copy(parts = owner.parts.map {
                         if (it.part == part) it.copy(highlights = null, released = true) else it
-                    }, drafts = owner.drafts - part.uri)
+                    }, drafts = owner.drafts.filterValues { it.edit.part.uri != part.uri }, bookmarks = owner.bookmarks - part.uri)
                 }
                 captionMemos.removeAll { it.part == part }
-                update { it.copy(transcripts = it.transcripts - part.uri, tracking = it.tracking.filterNot { memo -> memo.part == part }) }
+                update { it.copy(transcripts = it.transcripts.filterValues { memo -> memo.part.uri != part.uri }, tracking = it.tracking.filterNot { memo -> memo.part == part }) }
                 status("Downloaded footage removed")
             }
         }
@@ -377,34 +378,49 @@ internal object StudioSession {
             if (count > 0) status(if (count == 1) "Saved to Movies/Clip Studio" else "$count clips saved to Movies/Clip Studio")
         }
 
-    fun restoreDraftTranscript(projectId: String, memo: CaptionMemo) {
-        if (state.value.project?.id != projectId || memo.part.uri in state.value.transcripts) return
-        rememberCaptions(memo)
-        update { it.copy(transcripts = it.transcripts + (memo.part.uri to memo)) }
+    fun restoreDraftTranscript(projectId: String, draftId: String, memo: CaptionMemo) {
+        if (state.value.project?.id != projectId || draftId in state.value.transcripts) return
+        update { it.copy(transcripts = it.transcripts + (draftId to memo)) }
     }
 
-    fun saveDraft(projectId: String, draft: ClipDraft, create: Boolean) {
+    fun saveDraft(projectId: String, draftId: String, draft: ClipDraft, create: Boolean) {
         val project = state.value.library.projects.firstOrNull { it.id == projectId } ?: return
         val uri = draft.edit.part.uri
-        val saved = project.drafts[uri]
+        val saved = project.drafts[draftId]
         if ((!create && saved == null) || project.availableParts.none { it.part.uri == uri }) return
-        val activeMemo = state.value.transcripts[uri].takeIf { state.value.project?.id == projectId }
+        val activeMemo = state.value.transcripts[draftId].takeIf { state.value.project?.id == projectId }
         val updated = draft.copy(transcript = activeMemo ?: saved?.transcript ?: draft.transcript)
         if (saved == updated) return
-        updateProject(projectId) { it.copy(drafts = it.drafts + (uri to updated)) }
+        updateProject(projectId) { it.copy(drafts = it.drafts + (draftId to updated)) }
     }
 
-    fun editTranscript(uri: Uri, index: Int, text: String) {
-        val memo = state.value.transcripts[uri] ?: return
-        val transcript = memo.words
-        val row = transcript.getOrNull(index) ?: return
-        val words = text.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-        val timing = if (words.size == row.words.size) row.words.zip(words) { word, value -> word.copy(word = value) }
-        else emptyList()
-        val updated = transcript.toMutableList().apply { set(index, row.copy(text = text, words = timing)) }
+    fun updateTranscript(draftId: String, index: Int, replace: (TranscriptSegment) -> List<TranscriptSegment>) {
+        val memo = state.value.transcripts[draftId] ?: return
+        val row = memo.words.getOrNull(index) ?: return
+        val updated = memo.words.toMutableList().apply {
+            removeAt(index)
+            addAll(index, replace(row))
+        }
         val edited = memo.copy(words = updated)
-        rememberCaptions(edited)
-        update { it.copy(transcripts = it.transcripts + (uri to edited)) }
+        val projectId = state.value.project?.id ?: return
+        update { it.copy(transcripts = it.transcripts + (draftId to edited)) }
+        updateProject(projectId) { owner ->
+            val draft = owner.drafts[draftId] ?: return@updateProject owner
+            owner.copy(drafts = owner.drafts + (draftId to draft.copy(transcript = edited)))
+        }
+    }
+
+    fun saveFraming(projectId: String, framing: ProjectFraming) {
+        updateProject(projectId) { it.copy(framing = framing) }
+    }
+
+    fun setBookmark(projectId: String, part: SourcePart, timeMs: Long, add: Boolean) {
+        if (timeMs !in 0 until part.durationMs) return
+        updateProject(projectId) { project ->
+            val marks = project.bookmarks[part.uri].orEmpty()
+            val updated = if (add) (marks + timeMs).distinct().sorted() else marks - timeMs
+            project.copy(bookmarks = project.bookmarks + (part.uri to updated))
+        }
     }
 
     fun queue(clip: ExportClip) {

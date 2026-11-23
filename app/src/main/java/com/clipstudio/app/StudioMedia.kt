@@ -404,16 +404,19 @@ internal object StudioMedia {
                 retried = true
             }
             val (frameWidth, frameHeight) = layout.dimensions(width)
+            val enhance = !clip.originalFraming && clip.enhancement != VideoEnhancement.OFF
             val filter = if (clip.originalFraming) "[0:v]pad=ceil(iw/2)*2:ceil(ih/2)*2[out]"
-                else videoFilter(layout, camera, gameplay, width, clip.facePath, clip.enhanceFacecam)
-            val renderFilter = if (captions.isEmpty()) filter else {
+                else videoFilter(layout, camera, gameplay, width, clip.facePath, clip.enhanceFacecam, qualityScale = enhance)
+            val editedVideo = if (enhance) "[enhanced]" else "[out]"
+            val enhancedFilter = if (enhance) "$filter;[out]${clip.enhancement.filter}$editedVideo" else filter
+            val renderFilter = if (captions.isEmpty()) enhancedFilter else {
                 val script = File.createTempFile("studio-captions-", ".ass", context.cacheDir)
                 subtitle = script
                 script.writeText(AssKaraokeTrack.render(captions, clip.preset, frameWidth, frameHeight,
                     clip.captionPosition, clip.captionSize))
-                "$filter;[out]setpts=PTS-STARTPTS,ass=filename='${script.absolutePath}':fontsdir=/system/fonts[captioned]"
+                "$enhancedFilter;${editedVideo}setpts=PTS-STARTPTS,ass=filename='${script.absolutePath}':fontsdir=/system/fonts[captioned]"
             }
-            val video = if (subtitle == null) "[out]" else "[captioned]"
+            val video = if (subtitle == null) editedVideo else "[captioned]"
             val tracks = if (clip.muted && !clip.originalFraming) 0 else audioTrackCount(context, part.uri)
             val audioFilter = if (clip.originalFraming) null else audioFinishFilter(clip.audio, tracks, length)
             val audio = when {

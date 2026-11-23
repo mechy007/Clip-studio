@@ -3,6 +3,8 @@ package com.clipstudio.app
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
@@ -23,6 +25,33 @@ internal object StudioFraming {
             retriever.release()
         }
     }
+
+    suspend fun neighboringFrame(context: Context, uri: Uri, timeMs: Long, forward: Boolean): Long? =
+        withContext(Dispatchers.IO) {
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(context, uri, null)
+                val track = (0 until extractor.trackCount).firstOrNull {
+                    extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
+                } ?: return@withContext null
+                extractor.selectTrack(track)
+                extractor.seekTo((timeMs * 1_000 - 1).coerceAtLeast(0), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                var best: Long? = null
+                var nextSyncs = 0
+                while (extractor.sampleTime >= 0) {
+                    val sample = extractor.sampleTime / 1_000
+                    if (sample > timeMs && extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0 && ++nextSyncs > 1) break
+                    if (forward && sample > timeMs) best = minOf(best ?: sample, sample)
+                    if (!forward && sample < timeMs) best = maxOf(best ?: sample, sample)
+                    if (!extractor.advance()) break
+                }
+                best
+            } catch (_: RuntimeException) {
+                null
+            } finally {
+                extractor.release()
+            }
+        }
 
     suspend fun sourceDimensions(context: Context, uri: Uri): Pair<Int, Int>? = withContext(Dispatchers.IO) {
         val retriever = MediaMetadataRetriever()

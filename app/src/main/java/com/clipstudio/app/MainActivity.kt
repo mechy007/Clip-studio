@@ -67,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import java.util.Locale
+import java.util.UUID
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -115,6 +116,9 @@ class MainActivity : ComponentActivity() {
         var nextPartDialog by rememberSaveable { mutableStateOf(false) }
         var seenGuidedExport by remember { mutableStateOf(state.guidedExportRevision) }
         var incomingLayout by rememberSaveable { mutableStateOf(Layout.Split) }
+        var draftProject by rememberSaveable { mutableStateOf<String?>(null) }
+        var draftPart by rememberSaveable { mutableStateOf<String?>(null) }
+        var draftChoice by rememberSaveable { mutableStateOf<String?>(null) }
         var selectedPart by rememberSaveable { mutableStateOf<String?>(null) }
         var chosenMoment by rememberSaveable { mutableStateOf(-1L) }
         var chosenEnd by rememberSaveable { mutableStateOf(-1L) }
@@ -184,13 +188,21 @@ class MainActivity : ComponentActivity() {
             AlertDialog(
                 onDismissRequest = { removePartUri = null },
                 title = { Text("Remove downloaded footage?") },
-                text = { Text("This removes the source footage and its draft. Your exported MP4s stay in Movies/Clip Studio.") },
+                text = { Text("This removes the source footage, drafts, and bookmarks for this part. Your exported MP4s stay in Movies/Clip Studio.") },
                 confirmButton = { TextButton(enabled = !occupied, onClick = {
                     removePartUri = null
                     StudioSession.releasePart(this@MainActivity, releaseCandidate)
                 }) { Text("Remove footage") } },
                 dismissButton = { TextButton(onClick = { removePartUri = null }) { Text("Keep footage") } }
             )
+        }
+        fun createDraft(part: SourcePart, start: Long = -1L, end: Long = -1L) {
+            draftProject = project?.id
+            draftPart = part.uri.toString()
+            draftChoice = UUID.randomUUID().toString()
+            chosenMoment = start
+            chosenEnd = end
+            momentSelection++
         }
         if (nextPartDialog && canDownloadPart) {
             AlertDialog(
@@ -379,9 +391,7 @@ class MainActivity : ComponentActivity() {
                                 suggestions.forEach { (part, highlight) ->
                                     Card(onClick = {
                                         selectedPart = part.uri.toString()
-                                        chosenMoment = highlight.startMs
-                                        chosenEnd = highlight.endMs
-                                        momentSelection++
+                                        createDraft(part, highlight.startMs, highlight.endMs)
                                         tab = StudioTab.Editor
                                     }, enabled = !exporting) {
                                         Column(Modifier.fillMaxWidth().padding(12.dp),
@@ -455,9 +465,30 @@ class MainActivity : ComponentActivity() {
                                     showNotificationPermission()
                                 }) { Text("Edit across next section") }
                             }
-                            key(project.id, selected.part.uri) {
-                                ClipEditor(selected.part, project, state, chosenMoment, chosenEnd, momentSelection,
-                                    exportRequest, ::showNotificationPermission)
+                            val part = selected.part
+                            val primaryId = part.uri.toString()
+                            val drafts = project.drafts.filterValues { it.edit.part == part }
+                            val activeDraft = draftChoice?.takeIf { draftProject == project.id && draftPart == primaryId }
+                                ?: drafts.keys.lastOrNull() ?: primaryId
+                            var draftsOpen by rememberSaveable(project.id, primaryId) { mutableStateOf(false) }
+                            SettingsDisclosure("Clip drafts · ${drafts.size}", draftsOpen, { draftsOpen = !draftsOpen }) {
+                                drafts.entries.forEachIndexed { index, (id, draft) ->
+                                    FilterChip(selected = id == activeDraft, enabled = !exporting, onClick = {
+                                        draftProject = project.id
+                                        draftPart = primaryId
+                                        draftChoice = id
+                                        chosenMoment = -1L
+                                    }, label = {
+                                        Text("Clip ${index + 1} · ${timestamp(part.offsetMs + draft.edit.start)}–${timestamp(part.offsetMs + draft.edit.end)}")
+                                    })
+                                }
+                                OutlinedButton(enabled = !exporting, onClick = { createDraft(part) }) { Text("New clip draft") }
+                            }
+                            key(project.id, part.uri, activeDraft) {
+                                ClipEditor(part, project, state, activeDraft, chosenMoment, chosenEnd, momentSelection,
+                                    exportRequest, ::showNotificationPermission, onBookmarkDraft = { time ->
+                                        createDraft(part, time, minOf(part.durationMs, time + 15_000))
+                                    })
                             }
                         }
                         StudioTab.Projects -> {
