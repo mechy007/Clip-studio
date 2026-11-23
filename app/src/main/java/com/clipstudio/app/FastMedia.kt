@@ -29,6 +29,18 @@ internal object FastMedia {
         }.getOrNull()
     }
 
+    fun matchesVideo(context: Context, uri: Uri, width: Int, height: Int, expectAudio: Boolean): Boolean =
+        inspect(context, uri) { extractor, formats ->
+            val video = formats.indexOfFirst { it.mime() == MediaFormat.MIMETYPE_VIDEO_AVC }
+            if (video < 0 || expectAudio && formats.none { it.mime()?.startsWith("audio/") == true }) return@inspect false
+            val format = formats[video]
+            if (format.getInteger(MediaFormat.KEY_WIDTH) != width || format.getInteger(MediaFormat.KEY_HEIGHT) != height) {
+                return@inspect false
+            }
+            extractor.selectTrack(video)
+            extractor.sampleTime >= 0 && extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+        } ?: false
+
     fun canCopyTrim(context: Context, uri: Uri, startMs: Long): Boolean =
         inspect(context, uri) { extractor, formats ->
             if (formats.size !in 1..2 || formats.first().mime() != MediaFormat.MIMETYPE_VIDEO_AVC ||

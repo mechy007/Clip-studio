@@ -47,6 +47,6 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and models
 - **Fast Export** checks for hardware H.264 at the requested 720p or 1080p size and 30 fps. It uses the same layout, tracking, caption and audio filters, and retries in software if the hardware attempt fails. **Quick trim** keeps source framing and audio, copying compatible tracks when the start aligns with a sync frame and using an accurate render otherwise.
 - **Live preview** draws both crop panels from the same decoded frame as you play, drag, or pinch. Use **Preview edited clip** for the final captions and audio effects.
 - Previously generated captions and facecam samples are reused within covered ranges during the current app session. A narrower trim uses the existing samples and interpolates the new ends.
-- **Export first** moves a clip to the front of the queue. During a batch, **Next** moves it ahead of the remaining clips. Highlight analysis pauses during export and restarts from the unfinished section afterward.
+- **Export first** starts the queue with the selected clip. During a batch, **Next** moves it ahead of the remaining clips. Highlight analysis pauses during export and restarts from the unfinished section afterward.
 - Compatible, consecutive sections from the same download can be joined by copying their tracks. Other sections still use the normal rendering path.
 - **Export timings** identifies the encoder and reports setup, render/encode, and save times. Framing and caption effects run in the same pipeline as encoding, so they are reported together.

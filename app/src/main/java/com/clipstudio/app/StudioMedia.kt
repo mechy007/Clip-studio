@@ -287,7 +287,8 @@ internal object StudioMedia {
                 val hardware = FastMedia.hardwareAvc(frameWidth, frameHeight)
                 if (hardware != null) {
                     val codec = listOf("-c:v", "h264_mediacodec", "-codec_name", hardware, "-bf", "0")
-                    if (attempt("Rendering with hardware H.264", arguments(codec, "nv12"), true)) {
+                    if (attempt("Rendering with hardware H.264", arguments(codec, "nv12"), true) &&
+                        FastMedia.matchesVideo(context, Uri.fromFile(output), frameWidth, frameHeight, tracks > 0)) {
                         return@withContext result("Hardware H.264")
                     }
                     retried = true

@@ -69,11 +69,12 @@ internal class LiveFramingView(
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(visibility)
         main.removeCallbacks(loop)
-        player?.takeIf { ready }?.let { media ->
-            if (visibility == View.VISIBLE && !released) {
-                if (!seeking) media.start()
-                main.post(loop)
-            } else if (media.isPlaying) media.pause()
+        val media = player?.takeIf { ready } ?: return
+        if (visibility == View.VISIBLE && !released) {
+            if (!seeking) media.start()
+            main.post(loop)
+        } else if (media.isPlaying) {
+            media.pause()
         }
     }
 
