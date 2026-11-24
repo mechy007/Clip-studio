@@ -191,7 +191,7 @@ internal object StudioMedia {
         }
     }
 
-    private data class MediaStream(val url: String, val headers: String)
+    private data class MediaStream(val url: String, val headers: String, val seekOffsetMs: Long? = null)
     private data class RecordingStreams(
         val endMs: Long, val format: String, val inputs: List<MediaStream>,
         val dashTracks: List<IndexedDashTrack> = emptyList()
@@ -647,7 +647,10 @@ internal object StudioMedia {
         check(localTracks.isNotEmpty()) { "No selected DASH media fragments were downloaded." }
         progress(GuidedDownloadProgress(75, null, assembling = true,
             bytesFetched = localTracks.sumOf { it.length() }))
-        val inputs = localTracks.map { MediaStream(it.absolutePath, "") }
+        val inputs = localTracks.mapIndexed { index, file ->
+            val firstSelected = tracks[index].mediaFor(range.startMs, range.endMs).first().startMs
+            MediaStream(file.absolutePath, "", seekOffsetMs = (range.startMs - firstSelected).coerceAtLeast(0L))
+        }
         val staging = File(directory, "indexed-part.mp4.part")
         staging.delete()
         try {
@@ -781,10 +784,11 @@ internal object StudioMedia {
         remote: Boolean, tracks: RecordingTracks? = null, videoKbps: Int = 4_500,
         encoderThreads: Int = 2, progress: (Long) -> Unit
     ): Boolean {
-        val seek = if (startMs == 0L) emptyList() else listOf("-ss", seconds(startMs))
         val inputArgs = inputs.flatMap { stream ->
             val network = if (remote) listOf("-rw_timeout", "30000000") else emptyList()
             val headers = if (stream.headers.isEmpty()) emptyList() else listOf("-headers", stream.headers)
+            val seekOffset = stream.seekOffsetMs ?: startMs
+            val seek = if (seekOffset == 0L) emptyList() else listOf("-ss", seconds(seekOffset))
             network + headers + seek + listOf("-i", stream.url)
         }
         val codec = listOf("-threads", encoderThreads.coerceIn(1, 4).toString(),
