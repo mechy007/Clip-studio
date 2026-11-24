@@ -74,3 +74,10 @@ file, paste input, or use a saved clip transcript. For writing, interpretation,
 and follow-up questions, enter an Anthropic API key and model in Claude & creator
 voice. The key lasts until the skills dialog closes. Each Send shares the entered
 material and conversation with Anthropic. Public web research is optional.
+
+Highlights searches speech excerpts and detection reasons across every downloaded
+part. Use Timeline order to review matches in playback order, and Show more clips
+to see the next ten. In YouTube skills, choose a saved transcript by time range
+and audio track. Its timestamps start at the beginning of that clip. Chapter
+drafts can be copied as timestamped lines. For retention CSVs, label the first
+column Seconds or Percent to disambiguate short numeric timelines.

@@ -258,7 +258,7 @@ class MainActivity : ComponentActivity() {
             availableParts.flatMap { review ->
                 review.highlights.orEmpty().map { review.part to it }
             }.sortedWith(compareByDescending<Pair<SourcePart, Highlight>> { it.second.speechExcerpt != null }
-                .thenByDescending { it.second.score }).take(10)
+                .thenByDescending { it.second.score })
         }
         Scaffold(
             topBar = {
@@ -568,8 +568,27 @@ class MainActivity : ComponentActivity() {
                                 }
                                 if (suggestions.isNotEmpty()) {
                                     Text("Suggested clips", style = MaterialTheme.typography.titleLarge)
-                                    suggestions.forEach { (part, highlight) ->
+                                    var query by rememberSaveable(project.id) { mutableStateOf("") }
+                                    var chronological by rememberSaveable(project.id) { mutableStateOf(false) }
+                                    var limit by rememberSaveable(project.id, query, chronological) { mutableStateOf(10) }
+                                    val matches = remember(suggestions, query, chronological) {
+                                        val term = query.trim()
+                                        val found = suggestions.filter { (_, clip) ->
+                                            term.isEmpty() || clip.reason.contains(term, ignoreCase = true) ||
+                                                clip.speechExcerpt.orEmpty().contains(term, ignoreCase = true)
+                                        }
+                                        if (chronological) found.sortedBy { (part, clip) -> part.offsetMs + clip.startMs } else found
+                                    }
+                                    OutlinedTextField(query, { query = it }, singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(), label = { Text("Search speech or highlight reason") })
+                                    FilterChip(selected = chronological, onClick = { chronological = !chronological },
+                                        label = { Text("Timeline order") })
+                                    Text("${matches.size} matching clips", style = MaterialTheme.typography.labelLarge)
+                                    matches.take(limit).forEach { (part, highlight) ->
                                         StudioHighlightCard(part, highlight, !exporting) { editHighlight(part, highlight) }
+                                    }
+                                    if (matches.size > limit) OutlinedButton(onClick = { limit += 10 }) {
+                                        Text("Show more clips")
                                     }
                                 } else if (!pending) {
                                     Text("No strong moments found. You can still trim a clip manually.")

@@ -17,20 +17,44 @@ It reports three things, because they are three different problems with three di
 With --transcript it prints what you were saying at each cliff, which is the only version of this
 report you can act on without scrubbing the video yourself.
 """
-import csv, json, os, re, sys
+import csv, json, math, os, re, sys
 
 def load_csv(path):
     rows = []
-    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+    axis = None
+    with open(path, newline="", encoding="utf-8-sig") as fh:
         for r in csv.reader(fh):
-            nums = []
-            for c in r:
-                c = c.strip().replace("%", "").replace(",", "")
-                try: nums.append(float(c))
-                except ValueError: nums.append(None)
-            vals = [n for n in nums if n is not None]
-            if len(vals) >= 2: rows.append((vals[0], vals[1]))
-    return rows
+            if len(r) < 2:
+                continue
+            position, retention = [cell.strip() for cell in r[:2]]
+            try:
+                y = float(retention.rstrip("%"))
+            except ValueError:
+                if not rows:
+                    header = position.lower()
+                    if "second" in header or "timestamp" in header:
+                        axis = "seconds"
+                    elif "%" in header or "percent" in header:
+                        axis = "percent"
+                continue
+            if ":" in position:
+                fields = position.split(":")
+                if len(fields) not in (2, 3):
+                    raise ValueError("Use mm:ss or hh:mm:ss for timestamps.")
+                x = 0
+                for field in fields:
+                    x = x * 60 + float(field)
+                axis = "seconds"
+            else:
+                x = float(position.rstrip("%"))
+                if position.endswith("%"):
+                    axis = "percent"
+            if not (math.isfinite(x) and math.isfinite(y) and x >= 0 and y >= 0):
+                raise ValueError("Retention positions and values must be finite, nonnegative numbers.")
+            if rows and x <= rows[-1][0]:
+                raise ValueError("Retention positions must increase down the file.")
+            rows.append((x, y))
+    return rows, axis
 
 def main():
     a = sys.argv[1:]
@@ -38,14 +62,14 @@ def main():
     tr = a[a.index("--transcript") + 1] if "--transcript" in a else None
     files = [x for x in a if not x.startswith("--") and x != tr]
     if not files or not os.path.exists(files[0]): print(__doc__); sys.exit(1)
-    rows = load_csv(files[0])
+    rows, axis = load_csv(files[0])
     if len(rows) < 8: print("could not read at least 8 data points from that csv"); sys.exit(1)
     xs = [r[0] for r in rows]; ys = [r[1] for r in rows]
-    pct_axis = max(xs) <= 100.5
+    pct_axis = axis == "percent" if axis else max(xs) <= 100.5
     dur = None
     if "--duration" in a: dur = float(a[a.index("--duration") + 1])
     def at(x): return (x / 100.0 * dur) if (pct_axis and dur) else x
-    start = ys[0] or 100.0
+    start = ys[0]
     # HOOK: the first 30 seconds, or the first 10% when the axis is a percentage and we have no duration
     cutoff = 30.0 if not pct_axis else (30.0 / dur * 100 if dur else 10.0)
     hook_end = min((y for x, y in rows if x <= cutoff), default=start)
@@ -71,7 +95,7 @@ def main():
             t = c["at_seconds"]
             near = [q[2] for q in cues if q[0] <= t + 4 and q[1] >= t - 4]
             said[str(c["from"])] = " ".join(near)[:140]
-    out = {"points": len(rows), "start": start, "hook_leak": round(hook_leak, 2),
+    out = {"position_unit": "percent" if pct_axis else "seconds", "points": len(rows), "start": start, "hook_leak": round(hook_leak, 2),
            "end": ys[-1], "cliffs": cliffs, "slide_per_unit": round(slide, 3), "said": said}
     if as_json: print(json.dumps(out, indent=1)); return
     print(f"\n  {files[0]}   {len(rows)} points   {ys[0]:.1f}% -> {ys[-1]:.1f}%\n")

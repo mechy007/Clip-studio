@@ -35,3 +35,17 @@ class CreatorPackTest(unittest.TestCase):
                 self.assertTrue(validate(json.loads(run(PACK, tool, data, extra, 90))))
         with self.assertRaises(ValueError):
             run(PACK, "chapters", "invalid")
+
+    def test_short_recording_retention_axes(self):
+        for header, positions in [("Seconds", list(range(8))),
+                                  ("Timestamp", [f"00:{n:02d}" for n in range(8)])]:
+            data = header + ",Retention\n" + "\n".join(
+                f"{position},{100 - i * 5}" for i, position in enumerate(positions))
+            report = json.loads(run(PACK, "retention", data, "", 20))
+            self.assertEqual("seconds", report["position_unit"])
+            self.assertEqual(report["cliffs"][0]["from"], report["cliffs"][0]["at_seconds"])
+
+    def test_bad_retention_data(self):
+        for bad in ("NaN,90", "1,inf", "0,90"):
+            with self.assertRaises(ValueError):
+                run(PACK, "retention", "0,100\n" + bad)

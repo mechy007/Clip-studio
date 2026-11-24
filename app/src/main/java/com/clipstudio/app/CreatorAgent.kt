@@ -26,7 +26,7 @@ internal object CreatorAgent {
     @Synchronized
     fun analyze(context: Context, tool: String, data: String, extra: String, duration: Double): String {
         require(tool in localCreatorTools)
-        val root = File(context.cacheDir, "creator-a2feb21")
+        val root = File(context.cacheDir, "creator-a2feb21-r2")
         fun install(path: String) {
             val children = context.assets.list("youtube-agent/$path").orEmpty()
             if (children.isEmpty()) {
