@@ -101,7 +101,8 @@ private enum class StudioTab(val title: String, val icon: Int) {
     Import("Import", R.drawable.nav_import),
     Highlights("Highlights", R.drawable.nav_highlights),
     Editor("Editor", R.drawable.nav_editor),
-    Projects("Projects", R.drawable.nav_projects)
+    Projects("Projects", R.drawable.nav_projects),
+    Workspace("Workspace", R.drawable.nav_workspace)
 }
 
 class MainActivity : ComponentActivity() {
@@ -304,7 +305,10 @@ class MainActivity : ComponentActivity() {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                        CreatorSkills(project, selected?.part, compact = true)
+                        OutlinedButton(onClick = { tab = StudioTab.Workspace }) {
+                            Icon(painterResource(R.drawable.nav_workspace), null, Modifier.size(15.dp))
+                            Text("AI Hub")
+                        }
                         Box {
                             IconButton(onClick = { appearance = true }) {
                                 Text("⋮", style = MaterialTheme.typography.headlineSmall,
@@ -331,10 +335,17 @@ class MainActivity : ComponentActivity() {
                     val progress = state.guidedDownload
                     val activeWork = if (progress != null) Work.IMPORT else state.jobs.keys.firstOrNull()
                     val label = activeWork?.let { state.jobs[it] } ?: state.status
-                    if (label.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(label, Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 5.dp), maxLines = 2,
+                    if (label.isNotBlank()) Row(
+                        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(horizontal = 14.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.size(7.dp).background(MaterialTheme.colorScheme.secondary, RoundedCornerShape(50)))
+                        Text(label, Modifier.weight(1f).padding(start = 9.dp), maxLines = 2,
                             overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.secondary,
                             style = MaterialTheme.typography.labelSmall)
+                        progress?.let { Text("${it.percent}%", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         activeWork?.takeUnless { it == Work.STORAGE }?.let { work ->
                             TextButton(onClick = { StudioSession.cancel(work) }) {
                                 Text(if (work == Work.IMPORT && project?.guidedImport == true) "Pause" else "Cancel")
@@ -363,7 +374,7 @@ class MainActivity : ComponentActivity() {
                     NavigationBar(modifier = Modifier.clip(RoundedCornerShape(28.dp))
                         .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(28.dp)),
                         windowInsets = WindowInsets(0, 0, 0, 0), containerColor = MaterialTheme.colorScheme.surface) {
-                        StudioTab.entries.forEach { page ->
+                        StudioTab.entries.filter { it != StudioTab.Workspace }.forEach { page ->
                             val count = when (page) {
                                 StudioTab.Highlights -> suggestions.size
                                 StudioTab.Projects -> state.queue.size
@@ -395,6 +406,7 @@ class MainActivity : ComponentActivity() {
                             availableParts.sumOf { it.highlights.orEmpty().size }, suggestions.firstOrNull(), !exporting,
                             onImport = { tab = StudioTab.Import }, onEdit = { tab = StudioTab.Editor },
                             onHighlights = { tab = StudioTab.Highlights }, onProjects = { tab = StudioTab.Projects },
+                            onWorkspace = { tab = StudioTab.Workspace },
                             onHighlight = ::editHighlight, onRecipe = { choice ->
                                 selected?.part?.let { part ->
                                     createDraft(part)
@@ -403,6 +415,15 @@ class MainActivity : ComponentActivity() {
                                     tab = StudioTab.Editor
                                 }
                             })
+                        StudioTab.Workspace -> StudioWorkspace(
+                            project = project,
+                            source = selected?.part,
+                            state = state,
+                            onImport = { tab = StudioTab.Import },
+                            onHighlights = { tab = StudioTab.Highlights },
+                            onEditor = { tab = StudioTab.Editor },
+                            onProjects = { tab = StudioTab.Projects }
+                        )
                         StudioTab.Import -> {
                             StudioPageTitle("Import footage", "Open a local recording or pick parts from a YouTube replay.")
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {

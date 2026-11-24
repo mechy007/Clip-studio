@@ -115,7 +115,7 @@ internal fun ClipEditor(
     var originalSize by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var sourceSize by remember { mutableStateOf(0 to 0) }
     var trackingOn by rememberSaveable { mutableStateOf(savedEdit?.facePath?.isNotEmpty() == true) }
-    var normalize by rememberSaveable { mutableStateOf(savedEdit?.audio?.normalize ?: (recipe == StudioRecipe.Reaction)) }
+    var normalize by rememberSaveable { mutableStateOf(savedEdit?.audio?.normalize ?: (recipe?.normalizeAudio == true)) }
     var fades by rememberSaveable { mutableStateOf(savedEdit?.audio?.fade ?: false) }
     var mix by rememberSaveable { mutableStateOf(savedEdit?.audio?.mixTracks ?: false) }
     var voiceLevel by rememberSaveable { mutableStateOf(savedEdit?.audio?.voice ?: 1f) }

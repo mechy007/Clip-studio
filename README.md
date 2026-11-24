@@ -45,6 +45,12 @@ The build verifies the SHA-256 fingerprints of its bundled offline speech and au
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and models.
 
+## Expressive workspace
+
+The five primary destinations remain Home, Import, Highlights, Editor and Projects. The top-bar **AI Hub** and the Home workspace card open the advanced workspace, which groups offline Whisper and YAMNet, the YouTube creator skills, resumable import tools, precision editing, facecam rescue and tracking, audio finishing, creator presets, render diagnostics, export timings and storage management.
+
+Features that are not implemented yet are shown as planned roadmap slots rather than presented as working controls. The current roadmap includes custom subtitle font packs, encrypted cross-device project sync and expanded color grading.
+
 ## Timeline and project tools
 
 - **Preview export** renders a lower-resolution playback copy using the export layout, facecam path, audio effects, and caption timings. The waveform and playhead scrub the source while setting the clip boundaries.
