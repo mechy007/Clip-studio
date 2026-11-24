@@ -309,14 +309,14 @@ internal object StudioMedia {
 
     /** Use the standard full downloader once, then prepare one local range at a time. */
     suspend fun preparePartFromFull(
-        context: Context, projectId: String, link: String, startMs: Long,
+        context: Context, projectId: String, link: String, startMs: Long, height: Int = 1080,
         downloading: (Int) -> Unit, cutting: (Int) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
     ) = withContext(Dispatchers.IO) {
         val source = guidedFullFile(context, projectId)
         if (!YouTubeDownloadValidation.isValidMp4(source)) {
             check(source.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "Could not create download storage." }
             downloading(0)
-            val downloaded = YouTubeVideoImporter.download(context, link, 1080, onProgress = downloading)
+            val downloaded = YouTubeVideoImporter.download(context, link, height, onProgress = downloading)
             val file = File(requireNotNull(downloaded.path))
             check(file.renameTo(source)) {
                 file.delete()

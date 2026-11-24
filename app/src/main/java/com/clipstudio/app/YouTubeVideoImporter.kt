@@ -3,6 +3,7 @@ package com.clipstudio.app
 import android.content.Context
 import android.net.Uri
 import com.yausername.ffmpeg.FFmpeg
+import com.yausername.aria2c.Aria2c
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.yausername.youtubedl_android.YoutubeDLException
@@ -16,6 +17,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 object YouTubeVideoImporter {
     @Volatile private var initialized = false
+    @Volatile private var aria2Available = false
 
     @Synchronized
     internal fun prepare(context: Context) {
@@ -23,6 +25,13 @@ object YouTubeVideoImporter {
         val app = context.applicationContext
         YoutubeDL.init(app)
         FFmpeg.init(app)
+        try {
+            Aria2c.getInstance().init(app)
+            aria2Available = true
+        } catch (error: Exception) {
+            aria2Available = false
+            android.util.Log.w("ClipStudioYouTube", "Aria2 is unavailable; using yt-dlp's native downloader", error)
+        }
         try {
             YoutubeDL.updateYoutubeDL(app, YoutubeDL.UpdateChannel._STABLE)
         } catch (error: Exception) {
@@ -91,7 +100,7 @@ object YouTubeVideoImporter {
             runInterruptible(Dispatchers.IO) {
                 require(YouTubeLinkClassifier.isYouTubeUrl(url))
                 val videoId = YouTubeLinkClassifier.parseVideoId(url)
-                require(height in setOf(720, 1080, 2160))
+                require(height in setOf(360, 480, 720, 1080, 1440, 2160))
                 val imports = File(context.filesDir, "imports")
                 check(imports.mkdirs() || imports.isDirectory) { "Could not create the download directory." }
                 val id = UUID.randomUUID().toString()
@@ -99,13 +108,14 @@ object YouTubeVideoImporter {
                 check(staging.mkdirs()) { "Could not create the download directory." }
                 try {
                     prepare(context)
-                    fun request(preferDash: Boolean): YoutubeDLRequest {
+                    fun request(preferDash: Boolean, useAria2: Boolean): YoutubeDLRequest {
                         val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
                             .addOption("--no-playlist")
                             .addOption("--match-filter", "!is_live & !is_upcoming")
                             .addOption("--socket-timeout", 30)
-                            .addOption("--concurrent-fragments", 4)
+                            .addOption("--concurrent-fragments", 8)
                             .addOption("--buffer-size", "64K")
+                            .addOption("--http-chunk-size", "10M")
                             .addOption("--retries", 5)
                             .addOption("--fragment-retries", 10)
                             .addOption("--file-access-retries", 3)
@@ -113,17 +123,27 @@ object YouTubeVideoImporter {
                             .addOption("--merge-output-format", "mp4")
                             .addOption("-o", File(staging, "video.%(ext)s").absolutePath)
                         if (preferDash) request.addOption("--extractor-args", "youtube:formats=dashy")
+                        if (useAria2) {
+                            request.addOption("--downloader", "libaria2c.so")
+                                .addOption(
+                                    "--downloader-args",
+                                    "aria2c:--max-connection-per-server=8 --split=8 --min-split-size=1M --file-allocation=none"
+                                )
+                        }
                         return request
                     }
 
-                    fun executeAttempt(preferDash: Boolean) {
+                    fun executeAttempt(preferDash: Boolean, useAria2: Boolean) {
                         val processId = UUID.randomUUID().toString()
                         activeProcessId.set(processId)
-                        YoutubeDL.execute(request(preferDash), processId, false) { percent, _, line ->
-                            if (percent >= 0) onProgress(percent.toInt().coerceIn(0, 99))
-                            parseDownloadSpeedBytes(line)?.let(onSpeed)
+                        try {
+                            YoutubeDL.execute(request(preferDash, useAria2), processId, false) { percent, _, line ->
+                                if (percent >= 0) onProgress(percent.toInt().coerceIn(0, 99))
+                                parseDownloadSpeedBytes(line)?.let(onSpeed)
+                            }
+                        } finally {
+                            activeProcessId.compareAndSet(processId, null)
                         }
-                        activeProcessId.compareAndSet(processId, null)
                     }
 
                     fun clearStaging() {
@@ -134,17 +154,27 @@ object YouTubeVideoImporter {
                     var firstFailure: Exception? = null
                     var forbiddenFailure: Exception? = null
                     var completed = false
-                    for ((attempt, preferDash) in listOf(true, false).withIndex()) {
+                    val attempts = buildList {
+                        if (aria2Available) {
+                            add(true to true)
+                            add(false to true)
+                        }
+                        add(true to false)
+                        add(false to false)
+                    }
+                    for ((attempt, choice) in attempts.withIndex()) {
+                        val (preferDash, useAria2) = choice
                         if (attempt > 0) clearStaging()
                         try {
-                            executeAttempt(preferDash)
+                            executeAttempt(preferDash, useAria2)
                             if (YouTubeDownloadValidation.isValidMp4(rendered)) {
                                 completed = true
                                 break
                             }
                             firstFailure = IllegalStateException(
-                                if (preferDash) "DASH download did not produce a valid MP4."
-                                else "The downloader did not produce a valid MP4."
+                                if (useAria2) "Aria2 download did not produce a valid MP4."
+                                else if (preferDash) "DASH download did not produce a valid MP4."
+                                else "The native downloader did not produce a valid MP4."
                             )
                         } catch (interrupted: InterruptedException) {
                             throw interrupted
@@ -157,8 +187,7 @@ object YouTubeVideoImporter {
                             if (firstFailure == null) firstFailure = error else firstFailure.addSuppressed(error)
                             android.util.Log.w(
                                 "ClipStudioYouTube",
-                                if (preferDash) "DASH import failed; trying the compatible format fallback"
-                                else "Compatible format fallback failed",
+                                "Import attempt failed (DASH=$preferDash, Aria2=$useAria2); trying the next compatible route",
                                 error
                             )
                         }

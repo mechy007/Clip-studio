@@ -255,8 +255,9 @@ internal object StudioSession {
                         jobs = it.jobs + (Work.IMPORT to "$label · $percent%")) }
                 }
             }
-            StudioMedia.preparePartFromFull(app, project.id, link, start,
-                downloading = { report("Downloading full video", it) },
+            StudioMedia.preparePartFromFull(
+                app, project.id, link, start, height = download?.quality?.maxHeight ?: 1080,
+                downloading = { report("Downloading full video with accelerated downloader", it) },
                 cutting = { report("Preparing part $partNumber from saved video", it) },
                 publish = publish)
         } else {
