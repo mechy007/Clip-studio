@@ -64,3 +64,13 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and models
 - **Export timings** identifies the encoder and reports setup, render/encode, and save times. Framing and caption effects run in the same pipeline as encoding, so they are reported together.
 
 The editor has Trim, Frame, Captions, and Audio tabs. Use the top-bar Export button to open export settings. For a 50/50 vertical clip, turn on **Enhance facecam** under More export settings to sharpen the upper panel. Use **Preview export** to see the sharpening in a draft render. Use 1440p with a high-resolution recording when the crop contains enough source pixels and choose **High detail** to preserve more texture during compression.
+
+### YouTube creator skills
+
+Open Workspace → YouTube skills for all eleven workflows from the YouTube
+agent pack. Six original Python utilities run offline for hook scores, packaging,
+edit decisions, chapter drafts, retention CSVs and niche outliers. Import a text
+file, paste input, or use a saved clip transcript. For writing, interpretation,
+and follow-up questions, enter an Anthropic API key and model in Claude & creator
+voice. The key lasts until the skills dialog closes. Each Send shares the entered
+material and conversation with Anthropic. Public web research is optional.
