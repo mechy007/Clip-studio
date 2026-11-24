@@ -108,6 +108,7 @@ internal fun ClipEditor(
     var showPreview by rememberSaveable { mutableStateOf(false) }
     var live by rememberSaveable { mutableStateOf(false) }
     var fast by rememberSaveable { mutableStateOf(savedEdit?.fastExport ?: true) }
+    var facecamRescue by rememberSaveable { mutableStateOf(savedEdit?.facecamRescue ?: true) }
     var enhanceFacecam by rememberSaveable { mutableStateOf(savedEdit?.enhanceFacecam ?: false) }
     var enhancement by rememberSaveable { mutableStateOf(savedEdit?.enhancement ?: VideoEnhancement.OFF) }
     var highDetail by rememberSaveable { mutableStateOf(savedEdit?.highDetail ?: false) }
@@ -222,7 +223,7 @@ internal fun ClipEditor(
     fun clip() = ExportClip(
         part, start, end, layout, camera, gameplay, width, mute, if (captionEnabled) activeCues else emptyList(),
         preset, audioOptions(), facePath, fastExport = fast, highDetail = highDetail, enhanceFacecam = layout == Layout.Split && enhanceFacecam,
-        captionPosition = captionPosition, captionSize = captionSize, enhancement = enhancement
+        captionPosition = captionPosition, captionSize = captionSize, enhancement = enhancement, facecamRescue = facecamRescue
     )
     val draft = ClipDraft(
         clip().copy(captions = emptyList(), audio = AudioFinish(normalize, fades, mix, voiceLevel, gameLevel),
@@ -246,15 +247,21 @@ internal fun ClipEditor(
     val waitingForCaptions = captionEnabled && !customCaptions && generatingCaptions
     val canRenderEdit = !busy && !waitingForCaptions && end - start >= 500L
     val canPreviewEdit = canRenderEdit && Work.PREVIEW !in state.jobs
-    fun previewEdit() {
+    var comparisonRescue by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    fun previewClip(rescue: Boolean?) = if (rescue == null) clip() else clip().copy(facecamRescue = rescue)
+    fun startPreview(rescue: Boolean?) {
         playing = false
         live = false
+        comparisonRescue = rescue
         showPreview = true
-        StudioSession.preview(context, clip())
+        StudioSession.preview(context, previewClip(rescue), sampleOnly = rescue != null)
         notify()
         scope.launch { previewAnchor.bringIntoView() }
     }
-    val previewUri = state.playback?.takeIf { it.first == clip() }?.second
+    fun previewEdit() = startPreview(null)
+    val previewUri = state.playback?.takeIf {
+        it.first == previewClip(comparisonRescue) && state.playbackSampleOnly == (comparisonRescue != null)
+    }?.second
     val renderingPreview = Work.PREVIEW in state.jobs
     LaunchedEffect(showPreview, previewUri, renderingPreview) {
         if (showPreview && previewUri == null && !renderingPreview) showPreview = false
@@ -322,7 +329,12 @@ internal fun ClipEditor(
                     )
                 }
             }
-            Text("Draft preview · final MP4 uses your export settings", style = MaterialTheme.typography.bodySmall)
+            val previewLabel = when (comparisonRescue) {
+                true -> "Facecam Rescue on · 5-second sample"
+                false -> "Facecam Rescue off · 5-second sample"
+                null -> "Draft preview · final MP4 uses your export settings"
+            }
+            Text(previewLabel, style = MaterialTheme.typography.bodySmall)
         } else if (showPreview && renderingPreview) {
             Text("Rendering edited preview…", style = MaterialTheme.typography.bodySmall)
         } else if (live) {
@@ -811,6 +823,14 @@ internal fun ClipEditor(
                     if (highDetail) Text("Higher bitrate preserves more detail and makes larger MP4 files.",
                         style = MaterialTheme.typography.bodySmall)
                     if (layout == Layout.Split) {
+                        FilterChip(selected = facecamRescue, onClick = { facecamRescue = !facecamRescue },
+                            label = { Text("Facecam Rescue · Auto") })
+                        Text("Checks the facecam crop and lifts shadows or reduces noise when needed.",
+                            style = MaterialTheme.typography.bodySmall)
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            OutlinedButton(enabled = canPreviewEdit, onClick = { startPreview(false) }) { Text("Preview without Rescue") }
+                            OutlinedButton(enabled = canPreviewEdit, onClick = { startPreview(true) }) { Text("Preview with Rescue") }
+                        }
                         FilterChip(selected = enhanceFacecam, onClick = { enhanceFacecam = !enhanceFacecam },
                             label = { Text("Enhance facecam") })
                         Text("Sharpens edges in the facecam panel. Use Preview export to review the effect.",

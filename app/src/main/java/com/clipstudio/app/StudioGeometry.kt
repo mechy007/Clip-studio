@@ -42,13 +42,13 @@ internal fun trackingCoordinate(points: List<FacePoint>, fallback: Float, coordi
 
 internal fun videoFilter(
     layout: Layout, camera: Crop, game: Crop, resolution: Int = 1080, facePath: List<FacePoint> = emptyList(),
-    enhanceFacecam: Boolean = false, qualityScale: Boolean = false
+    enhanceFacecam: Boolean = false, qualityScale: Boolean = false, rescue: FacecamRescue = FacecamRescue()
 ): String {
     val (outputWidth, outputHeight) = layout.dimensions(resolution)
     val panelHeight = outputHeight / 2
     val qualityFlags = if (qualityScale) ":flags=lanczos" else ""
     fun fill(
-        width: Int, height: Int, crop: Crop, path: List<FacePoint> = emptyList(), scaleFlags: String = ""
+        width: Int, height: Int, crop: Crop, path: List<FacePoint> = emptyList(), scaleFlags: String = "", correction: String = ""
     ): String {
         val ratio = "$width/$height"
         val zoom = crop.zoom.coerceIn(1f, 4f)
@@ -57,11 +57,11 @@ internal fun videoFilter(
         val w = "max(2,trunc(min(iw,ih*$ratio)/$zoom/2)*2)"
         val h = "max(2,trunc(min(ih,iw/($ratio))/$zoom/2)*2)"
         return "crop=w='$w':h='$h':x='(iw-ow)*$x':y='(ih-oh)*$y'," +
-            "scale=$width:$height$scaleFlags,setsar=1"
+            "${correction}scale=$width:$height$scaleFlags,setsar=1"
     }
     val clarity = if (enhanceFacecam) ",unsharp=lx=5:ly=5:la=0.45:ca=0" else ""
     return when (layout) {
-        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera, facePath, ":flags=lanczos")}$clarity[top];" +
+        Layout.Split -> "[0:v]split=2[a][b];[a]${fill(outputWidth, panelHeight, camera, facePath, ":flags=lanczos", rescue.filters())}$clarity[top];" +
             "[b]${fill(outputWidth, panelHeight, game, scaleFlags = qualityFlags)}[bottom];[top][bottom]vstack[out]"
         Layout.Fill, Layout.Square -> "[0:v]${fill(outputWidth, outputHeight, game, scaleFlags = qualityFlags)}[out]"
         Layout.Fit, Layout.Landscape -> "[0:v]scale=$outputWidth:$outputHeight:force_original_aspect_ratio=decrease:" +

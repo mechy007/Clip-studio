@@ -642,18 +642,18 @@ internal object StudioMedia {
         } finally { output.file.delete() }
     }
 
-    suspend fun preview(context: Context, clip: ExportClip): Uri =
-        Uri.fromFile(render(context, clip, preview = true) {}.file)
+    suspend fun preview(context: Context, clip: ExportClip, sampleOnly: Boolean = false): Uri =
+        Uri.fromFile(render(context, clip, preview = true, phase = {}, sampleOnly = sampleOnly).file)
 
     private data class Rendered(val file: File, val stats: RenderStats)
 
     private suspend fun render(
-        context: Context, clip: ExportClip, preview: Boolean, phase: (String) -> Unit
+        context: Context, clip: ExportClip, preview: Boolean, phase: (String) -> Unit, sampleOnly: Boolean = false
     ): Rendered = withContext(Dispatchers.IO) {
         val (part, startMs, endMs, layout, camera, gameplay) = clip
         require(startMs in 0 until endMs && endMs <= part.durationMs)
         val started = SystemClock.elapsedRealtime()
-        val length = endMs - startMs
+        val length = if (preview && sampleOnly) minOf(5_000L, endMs - startMs) else endMs - startMs
         val width = if (preview) 540 else clip.width
         val captions = if (clip.originalFraming) emptyList() else clip.captions
         val output = File.createTempFile(if (preview) "studio-preview-" else "studio-export-", ".mp4", context.cacheDir)
@@ -686,8 +686,12 @@ internal object StudioMedia {
             }
             val (frameWidth, frameHeight) = layout.dimensions(width)
             val enhance = !clip.originalFraming && clip.enhancement != VideoEnhancement.OFF
+            val rescue = if (!clip.originalFraming && layout == Layout.Split && clip.facecamRescue) {
+                phase("Checking facecam lighting and noise")
+                inspectFacecam(context, clip)
+            } else FacecamRescue()
             val filter = if (clip.originalFraming) "[0:v]pad=ceil(iw/2)*2:ceil(ih/2)*2[out]"
-                else videoFilter(layout, camera, gameplay, width, clip.facePath, clip.enhanceFacecam, qualityScale = enhance)
+                else videoFilter(layout, camera, gameplay, width, clip.facePath, clip.enhanceFacecam, qualityScale = enhance, rescue = rescue)
             val editedVideo = if (enhance) "[enhanced]" else "[out]"
             val enhancedFilter = if (enhance) "$filter;[out]${clip.enhancement.filter}$editedVideo" else filter
             val renderFilter = if (captions.isEmpty()) enhancedFilter else {
@@ -706,7 +710,7 @@ internal object StudioMedia {
                 else -> listOf("-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k")
             }
             val graph = if (audioFilter == null) renderFilter else "$renderFilter;$audioFilter"
-            fun arguments(codec: List<String>, pixels: String): Array<String> {
+            fun arguments(codec: List<String>, pixels: String, renderGraph: String = graph): Array<String> {
                 val rate = if (clip.originalFraming) emptyList() else listOf("-r", "30")
                 val bitrate = when {
                     !preview && !clip.originalFraming && width == 1440 -> if (clip.highDetail) "16000k" else "12000k"
@@ -714,7 +718,7 @@ internal object StudioMedia {
                     width == 1080 || clip.originalFraming -> "4500k"
                     else -> "2600k"
                 }
-                return (inputArgs() + listOf("-filter_complex_threads", "2", "-filter_complex", graph, "-map", video) +
+                return (inputArgs() + listOf("-filter_complex_threads", "2", "-filter_complex", renderGraph, "-map", video) +
                     rate + codec + listOf("-b:v", bitrate, "-pix_fmt", pixels) + audio + outputArgs).toTypedArray()
             }
             if (clip.fastExport && !preview && !clip.originalFraming) {
@@ -728,9 +732,16 @@ internal object StudioMedia {
                     retried = true
                 }
             }
-            val software = arguments(listOf("-threads", "2", "-c:v", "libopenh264"), "yuv420p")
-            check(attempt(if (retried) "Retrying with software H.264" else "Rendering with software H.264",
-                software)) {
+            val software = listOf("-threads", "2", "-c:v", "libopenh264")
+            var rendered = attempt(if (retried) "Retrying with software H.264" else "Rendering with software H.264",
+                arguments(software, "yuv420p"))
+            val correction = rescue.filters()
+            if (!rendered && correction.isNotEmpty()) {
+                retried = true
+                rendered = attempt("Retrying without Facecam Rescue",
+                    arguments(software, "yuv420p", graph.replaceFirst(correction, "")))
+            }
+            check(rendered) {
                 if (subtitle == null) "Could not render this clip." else "Could not render the clip with its captions."
             }
             result("Software H.264")

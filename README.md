@@ -24,6 +24,8 @@ Before adding a part, review estimated network data and peak free space for the 
 
 The **Home** dashboard shows your current project, highest-ranked highlight, and shortcuts to editing and exports. **Highlights** uses the bundled Whisper model first to find spoken moments and show transcript excerpts. The speech scan runs on downloaded footage and uses segment timing. Audio and motion cues still suggest clips in quieter recordings. For projects with earlier results, open **Highlights → Refresh with Whisper**.
 
+**Facecam Rescue** runs automatically for split-screen previews and exports. It samples the selected facecam crop across the trim and applies mild shadow lift or denoising when the samples agree. In **Export → More export settings**, turn the skill off per draft or compare five-second previews with and without it.
+
 ## Build
 
 Use JDK 17, Android SDK 35, Android NDK 27.2.12479018, CMake 3.22.1, and Gradle 8.9.

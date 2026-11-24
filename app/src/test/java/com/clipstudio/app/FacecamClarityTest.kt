@@ -16,6 +16,33 @@ class FacecamClarityTest {
         assertTrue(filter.contains("scale=1080:960:flags=lanczos,setsar=1[top]"))
         assertTrue(filter.contains("scale=1080:960,setsar=1[bottom]"))
     }
+    @Test fun rescueNeedsAgreementAcrossSampledFrames() {
+        val dark = FacecamFrameSignal(52, 100, 7f)
+        val normal = FacecamFrameSignal(110, 190, 1f)
+        assertEquals(FacecamRescue(), chooseFacecamRescue(listOf(normal, dark, normal)))
+        assertEquals(FacecamRescue(), chooseFacecamRescue(listOf(dark)))
+        assertEquals(FacecamRescue(true, true), chooseFacecamRescue(listOf(dark, normal, dark)))
+    }
+
+    @Test fun noiseMeasurementDistinguishesFineNoiseFromCleanLuma() {
+        fun sample(noisy: Boolean) = IntArray(64 * 64) { index ->
+            if (!noisy) 90 else 90 + ((index * 7 + index / 64 * 13) % 17 - 8)
+        }
+        val clean = requireNotNull(facecamFrameSignal(64, 64, sample(false)))
+        val noisy = requireNotNull(facecamFrameSignal(64, 64, sample(true)))
+        assertTrue(requireNotNull(noisy.noise) > requireNotNull(clean.noise))
+    }
+
+    @Test fun rescueTouchesOnlyTheFacecamBeforeUpscaling() {
+        val crop = Crop(.5f, .5f)
+        val rescue = FacecamRescue(true, true)
+        val graph = videoFilter(Layout.Split, crop, crop, rescue = rescue)
+        assertTrue(graph.substringBefore("[top]").contains("hqdn3d=1.8:1.3:2.8:2.0,eq=gamma="))
+        assertTrue(graph.substringBefore("[top]").indexOf("eq=gamma=") < graph.indexOf("scale="))
+        assertFalse(graph.substringAfter("[top]").contains("hqdn3d"))
+        assertFalse(videoFilter(Layout.Fill, crop, crop, rescue = rescue).contains("eq=gamma="))
+    }
+
     @Test fun enhancementSharpensOnlyTheFacecamAt1440p() {
         val camera = Crop(.2f, .3f, 3f)
         val game = Crop(.5f, .5f)

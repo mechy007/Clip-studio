@@ -314,7 +314,7 @@ internal class StudioProjectStore(context: Context) {
             .put("width", width).put("muted", muted).put("preset", preset.name).put("captions", captions.json())
             .put("audio", audio.json()).put("fast", fastExport).put("original", originalFraming).put("detail", highDetail)
             .put("enhanceFacecam", enhanceFacecam).put("captionPosition", captionPosition.name).put("captionSize", captionSize)
-            .put("enhancement", enhancement.name)
+            .put("enhancement", enhancement.name).put("facecamRescue", facecamRescue)
             .put("tracking", JSONArray(facePath.map { JSONArray(listOf(it.timeMs, it.x.toDouble(), it.y.toDouble())) }))
 
     private fun Crop.json() = JSONArray(listOf(x.toDouble(), y.toDouble(), zoom.toDouble()))
@@ -342,7 +342,7 @@ internal class StudioProjectStore(context: Context) {
             getJSONArray("camera").crop(), getJSONArray("gameplay").crop(), getInt("width"), getBoolean("muted"),
             captions, CaptionPreset.valueOf(getString("preset")), audio(), path, optBoolean("fast"), optBoolean("original"),
             optBoolean("detail"), optBoolean("enhanceFacecam"), captionPosition(), optInt("captionSize", 100),
-            VideoEnhancement.entries.firstOrNull { it.name == optString("enhancement") } ?: VideoEnhancement.OFF)
+            VideoEnhancement.entries.firstOrNull { it.name == optString("enhancement") } ?: VideoEnhancement.OFF, optBoolean("facecamRescue", true))
     }
 
     private fun JSONObject.captionPosition(): CaptionPosition {
