@@ -90,12 +90,13 @@ internal object IndexedDashPlanner {
             val baseUri = URI(base)
             val fragmentUri = URI(fragment)
             val resolved = if (fragmentUri.isAbsolute) fragmentUri else baseUri.resolve(fragmentUri)
-            // DASH BaseURL query parameters can carry signed CDN authorization. Preserve
-            // them when a relative segment path does not provide its own query.
-            val withBaseQuery = if (resolved.rawQuery == null && baseUri.rawQuery != null) {
-                URI.create(resolved.toASCIIString() + "?" + baseUri.rawQuery)
-            } else resolved
-            withBaseQuery.toString()
+            // DASH BaseURL query parameters can carry signed CDN authorization while
+            // segment paths add their own query (for example, sq=7). Keep both.
+            val query = if (fragmentUri.isAbsolute || baseUri.rawQuery == null) {
+                resolved.rawQuery
+            } else listOfNotNull(baseUri.rawQuery, resolved.rawQuery).joinToString("&").ifBlank { null }
+            val prefix = resolved.toASCIIString().substringBefore("?").substringBefore("#")
+            URI.create(prefix + (query?.let { "?$it" } ?: "")).toString()
         }.getOrNull()
     }
 
