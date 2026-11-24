@@ -651,7 +651,7 @@ internal object StudioMedia {
             val firstSelected = tracks[index].mediaFor(range.startMs, range.endMs).first().startMs
             MediaStream(file.absolutePath, "", seekOffsetMs = (range.startMs - firstSelected).coerceAtLeast(0L))
         }
-        val staging = File(directory, "indexed-part.mp4.part")
+        val staging = File(directory, "indexed-part-writing.mp4")
         staging.delete()
         try {
             val inputArgs = inputs.flatMap { stream ->
