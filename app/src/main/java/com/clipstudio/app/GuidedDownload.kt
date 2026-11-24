@@ -64,8 +64,14 @@ internal fun RecordingPartWindow.downloadChunks(): List<RecordingPartWindow> =
 
 internal data class GuidedDownloadProgress(
     val percent: Int, val etaMs: Long?, val assembling: Boolean = false, val newAttempt: Boolean = false,
-    val bytesFetched: Long? = null
+    val bytesFetched: Long? = null, val bytesPerSecond: Long? = null
 )
+
+/** Bounded parallelism for independent guided-download time ranges. */
+internal fun guidedDownloadConcurrency(fast: Boolean): Int = if (fast) 3 else 2
+
+/** DASH fragment HTTP requests are lighter than simultaneous FFmpeg section jobs. */
+internal fun indexedDashParallelism(fast: Boolean): Int = if (fast) 8 else 4
 
 internal fun guidedDownloadProgress(
     totalMs: Long, savedMs: Long, processedMs: Long, elapsedMs: Long
@@ -94,6 +100,7 @@ internal class GuidedDownloadFiles(val directory: File) {
     val concatList = File(directory, "chunks.ffconcat")
 
     fun chunk(index: Int) = File(directory, "chunk-$index.mp4")
+    fun stagingChunk(index: Int) = File(directory, "writing-${index.toString().padStart(3, '0')}.mp4")
 
     fun load(start: Long, requestedEnd: Long? = null): GuidedDownloadPlan? {
         val data = try {

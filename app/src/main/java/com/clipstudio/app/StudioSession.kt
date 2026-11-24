@@ -255,8 +255,9 @@ internal object StudioSession {
                         jobs = it.jobs + (Work.IMPORT to "$label · $percent%")) }
                 }
             }
-            StudioMedia.preparePartFromFull(app, project.id, link, start,
-                downloading = { report("Downloading full video", it) },
+            StudioMedia.preparePartFromFull(
+                app, project.id, link, start, height = download?.quality?.maxHeight ?: 1080,
+                downloading = { report("Downloading full video with accelerated downloader", it) },
                 cutting = { report("Preparing part $partNumber from saved video", it) },
                 publish = publish)
         } else {
@@ -266,13 +267,22 @@ internal object StudioSession {
                         if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true || revision != guidedProgressRevision) return@launch
                         val current = state.value.guidedDownload
                         if (!progress.newAttempt && (current?.assembling == true || progress.percent < (current?.percent ?: 0))) return@launch
-                        val label = if (progress.newAttempt) "Trying resumable download for $partLabel"
+                        val transferDetails = buildString {
+                            progress.bytesFetched?.takeIf { it > 0L }?.let {
+                                append(" · ${android.text.format.Formatter.formatFileSize(app, it)} received")
+                            }
+                            progress.bytesPerSecond?.takeIf { it > 0L }?.let {
+                                append(" · ${android.text.format.Formatter.formatShortFileSize(app, it)}/s")
+                            }
+                        }
+                        val label = if (progress.newAttempt) "Downloading part sections in parallel for $partLabel"
                         else if (progress.assembling) "Assembling $partLabel" else if (progress.percent == 0 && progress.bytesFetched != null) {
-                            if (progress.bytesFetched == 0L) "Connecting for $partLabel"
-                            else "Downloading $partLabel · ${android.text.format.Formatter.formatFileSize(app, progress.bytesFetched)} received"
-                        } else if (progress.percent == 0) "Preparing download for $partLabel" else buildString {
+                            if (progress.bytesFetched == 0L) "Connecting for $partLabel$transferDetails"
+                            else "Downloading $partLabel$transferDetails"
+                        } else if (progress.percent == 0) "Preparing download for $partLabel$transferDetails" else buildString {
                             append("Downloading $partLabel · ${progress.percent}%")
                             progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
+                            append(transferDetails)
                         }
                         update { it.copy(guidedDownload = progress, jobs = it.jobs + (Work.IMPORT to label)) }
                     }
@@ -290,7 +300,17 @@ internal object StudioSession {
         val last = state.value.project?.latestSourcePart
         val offset = last?.nextOffsetMs ?: 0L
         val segmented = try {
-            StudioMedia.downloadInParts(app, link, offset, last?.formatId) { part ->
+            StudioMedia.downloadInParts(
+                app, link, offset, last?.formatId,
+                onTransferProgress = { bytesPerSecond, totalBytes ->
+                    withContext(Dispatchers.Main.immediate) {
+                        val rate = android.text.format.Formatter.formatShortFileSize(app, bytesPerSecond) + "/s"
+                        val fetched = android.text.format.Formatter.formatShortFileSize(app, totalBytes)
+                        val ready = state.value.project?.parts?.count { !it.part.joined } ?: 0
+                        describe(Work.IMPORT, "Downloading · $rate · $fetched received · $ready sections ready")
+                    }
+                }
+            ) { part ->
                 withContext(Dispatchers.Main.immediate) {
                     addPart(app, part)
                     describe(Work.IMPORT, "Downloading · ${state.value.project?.parts?.count { !it.part.joined } ?: 0} sections ready")
@@ -305,9 +325,18 @@ internal object StudioSession {
         if (!segmented) {
             check(offset == 0L) { "Could not resume this format. Completed sections are still available." }
             describe(Work.IMPORT, "Preparing full-video import")
-            val uri = YouTubeVideoImporter.download(app, link, 1080) { percent ->
+            val latestSpeed = java.util.concurrent.atomic.AtomicLong(0L)
+            val uri = YouTubeVideoImporter.download(
+                app, link, 1080,
+                onSpeed = { bytesPerSecond -> latestSpeed.set(bytesPerSecond) }
+            ) { percent ->
                 scope.launch {
-                    if (jobs[Work.IMPORT]?.isActive == true) describe(Work.IMPORT, "Downloading full video · $percent%")
+                    if (jobs[Work.IMPORT]?.isActive == true) {
+                        val rate = latestSpeed.get().takeIf { it > 0L }?.let {
+                            " · ${android.text.format.Formatter.formatShortFileSize(app, it)}/s"
+                        }.orEmpty()
+                        describe(Work.IMPORT, "Downloading full video · $percent%$rate")
+                    }
                 }
             }
             addPart(app, SourcePart(uri, 0, StudioMedia.duration(app, uri)))

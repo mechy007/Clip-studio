@@ -1,0 +1,203 @@
+package com.clipstudio.app
+
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.Job
+import java.util.concurrent.atomic.AtomicInteger
+
+/** Keeps fragment workers bounded even when a long recording has thousands of fragments. */
+internal fun indexedDashWorkerCount(parallelism: Int, workItems: Int): Int {
+    require(parallelism in 1..8) { "Indexed DASH parallelism must be between 1 and 8." }
+    require(workItems >= 0) { "Work item count cannot be negative." }
+    return minOf(parallelism, workItems)
+}
+
+/**
+ * Downloads only the DASH initialization data and media fragments that overlap one
+ * requested time window. Completed fragment files are retained after failures so a
+ * retry can reuse them; partial files are never treated as complete.
+ */
+internal object IndexedDashDownloader {
+    private data class WorkItem(
+        val trackIndex: Int,
+        val fragment: IndexedDashFragment,
+        val headers: Map<String, String>,
+        val destination: File
+    )
+
+    suspend fun download(
+        tracks: List<IndexedDashTrack>,
+        startMs: Long,
+        endMs: Long,
+        directory: File,
+        parallelism: Int,
+        onBytesFetched: (Long) -> Unit = {}
+    ): List<File> = withContext(Dispatchers.IO) {
+        require(tracks.isNotEmpty() && tracks.size <= 2)
+        require(startMs >= 0L && endMs > startMs)
+        require(parallelism in 1..8)
+        check(directory.isDirectory || directory.mkdirs()) { "Could not create indexed download storage." }
+
+        val selectedByTrack = tracks.map { track ->
+            val media = track.mediaFor(startMs, endMs)
+            check(media.isNotEmpty()) { "The DASH index has no media fragments for this time range." }
+            listOf(track.initialization) + media
+        }
+        val outputFiles = selectedByTrack.mapIndexed { trackIndex, fragments ->
+            val signature = sha256(fragments.joinToString("|") { it.url }).take(20)
+            File(directory, "indexed-track-$trackIndex-$signature.mp4")
+        }
+        val work = selectedByTrack.flatMapIndexed { trackIndex, fragments ->
+            if (outputFiles[trackIndex].isFile && outputFiles[trackIndex].length() > 0L) {
+                emptyList()
+            } else fragments.map { fragment ->
+                val digest = sha256(fragment.url).take(20)
+                WorkItem(
+                    trackIndex,
+                    fragment,
+                    tracks[trackIndex].headers,
+                    File(directory, "track-$trackIndex-fragment-${fragment.index}-$digest.bin")
+                )
+            }
+        }
+        val workerCount = indexedDashWorkerCount(parallelism, work.size)
+        val completedBytes = java.util.concurrent.atomic.AtomicLong(
+            work.sumOf { item -> item.destination.takeIf { it.isFile }?.length() ?: 0L } +
+                outputFiles.sumOf { file -> file.takeIf { it.isFile }?.length() ?: 0L }
+        )
+        onBytesFetched(completedBytes.get())
+
+        if (workerCount > 0) {
+            // Use a fixed worker pool instead of creating one coroutine for every fragment.
+            // Long VOD ranges can contain thousands of fragments; only the active workers
+            // need coroutines, while the queue stays as a plain indexed list.
+            val nextWorkIndex = AtomicInteger(0)
+            coroutineScope {
+                List(workerCount) {
+                    async {
+                        while (true) {
+                            coroutineContext.ensureActive()
+                            val workIndex = nextWorkIndex.getAndIncrement()
+                            if (workIndex >= work.size) break
+                            val item = work[workIndex]
+                            if (item.destination.isFile && item.destination.length() > 0L) continue
+                            downloadOne(item, onChunkBytes = { count ->
+                                val total = completedBytes.addAndGet(count)
+                                onBytesFetched(total)
+                            })
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+
+        val outputs = ArrayList<File>(tracks.size)
+        val workByTrack = work.groupBy { it.trackIndex }
+        for (trackIndex in tracks.indices) {
+            coroutineContext.ensureActive()
+            val output = outputFiles[trackIndex]
+            if (output.isFile && output.length() > 0L) {
+                outputs += output
+                continue
+            }
+            val items = workByTrack[trackIndex].orEmpty().sortedBy { it.fragment.index }
+            check(items.size == selectedByTrack[trackIndex].size) {
+                "Some selected DASH fragments are missing. Retry this part to resume the download."
+            }
+            val staging = File(directory, output.name + ".part")
+            staging.delete()
+            try {
+                FileOutputStream(staging).buffered().use { sink ->
+                    items.forEach { item ->
+                        item.destination.inputStream().buffered().use { source -> source.copyTo(sink) }
+                    }
+                    sink.flush()
+                }
+                check(staging.isFile && staging.length() > 0L) {
+                    "The selected DASH fragments could not be assembled."
+                }
+                output.delete()
+                check(staging.renameTo(output)) { "Could not assemble the selected DASH media fragments." }
+                // The complete per-track file is now the resumable checkpoint. Free the
+                // individual segment files before assembling the next track to cap peak storage.
+                items.forEach { it.destination.delete() }
+                outputs += output
+            } finally {
+                staging.delete()
+            }
+        }
+        outputs
+    }
+
+    private suspend fun downloadOne(item: WorkItem, onChunkBytes: (Long) -> Unit) {
+        val job = coroutineContext[Job]
+        val partial = File(item.destination.absolutePath + ".part")
+        partial.delete()
+        var lastError: Exception? = null
+        repeat(3) { attempt ->
+            coroutineContext.ensureActive()
+            val connection = (URL(item.fragment.url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 20_000
+                readTimeout = 60_000
+                instanceFollowRedirects = true
+                requestMethod = "GET"
+                item.headers.forEach { (name, value) -> setRequestProperty(name, value) }
+            }
+            try {
+                connection.connect()
+                val status = connection.responseCode
+                check(status in 200..299) { "DASH fragment request failed (HTTP $status)." }
+                val expectedBytes = connection.contentLengthLong
+                var receivedBytes = 0L
+                connection.inputStream.use { input ->
+                    FileOutputStream(partial).buffered().use { output ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 8)
+                        while (true) {
+                            job?.ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            receivedBytes += count
+                            onChunkBytes(count.toLong())
+                        }
+                        output.flush()
+                    }
+                }
+                check(partial.isFile && partial.length() > 0L) { "The server returned an empty DASH fragment." }
+                check(expectedBytes <= 0L || receivedBytes == expectedBytes) {
+                    "DASH fragment ${item.fragment.index + 1} was incomplete (expected $expectedBytes bytes, received $receivedBytes)."
+                }
+                check(partial.renameTo(item.destination)) { "Could not save a downloaded DASH fragment." }
+                return
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                lastError = error
+                partial.delete()
+                if (attempt < 2) delay(350L * (attempt + 1))
+            } finally {
+                connection.disconnect()
+            }
+        }
+        throw IllegalStateException("Could not download DASH fragment ${item.fragment.index + 1}.", lastError)
+    }
+
+    private fun sha256(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        return digest.digest(value.toByteArray(Charsets.UTF_8)).joinToString("") {
+            (it.toInt() and 0xff).toString(16).padStart(2, '0')
+        }
+    }
+}

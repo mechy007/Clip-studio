@@ -18,17 +18,22 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.net.URI
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLongArray
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import org.json.JSONObject
 
@@ -59,41 +64,40 @@ internal object StudioMedia {
         }
     }
 
-    /** Publish only MP4s whose mux has completed. CSV rows are flushed by FFmpeg after closing each file. */
+    /**
+     * Resolve separate video/audio DASH streams where available, then let FFmpeg read both
+     * inputs concurrently and stream-copy completed 40-second MP4 sections.
+     *
+     * The previous path selected one progressive muxed URL. That made the phone depend on
+     * one throttled response and prevented the video/audio transfers from progressing in
+     * parallel. The resolver still falls back to a compatible muxed format when needed.
+     */
     suspend fun downloadInParts(
         context: Context,
         link: String,
         resumeAtMs: Long = 0,
         formatId: String? = null,
+        onTransferProgress: suspend (bytesPerSecond: Long, totalBytes: Long) -> Unit = { _, _ -> },
         onPart: suspend (SourcePart) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
-        val videoId = YouTubeLinkClassifier.parseVideoId(link)
-        val media = runInterruptible {
-            YouTubeVideoImporter.prepare(context)
-            val format = formatId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) }
-                ?: "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
-            val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
-                .addOption("--no-playlist")
-                .addOption("--match-filter", "!is_live & !is_upcoming")
-                .addOption("--socket-timeout", 20)
-                .addOption("-f", format)
-                .addOption("--print", """{"url":%(url)j,"format":%(format_id)j,"duration":%(duration)j}""")
-            YoutubeDL.execute(request).out.lineSequence().map(String::trim).firstOrNull { it.startsWith("{") }
-                ?.let(::JSONObject)
-        } ?: return@withContext false
-        val source = media.getString("url")
-        val selectedFormat = media.getString("format")
-        val expectedEnd = media.optDouble("duration", 0.0).let { if (it.isFinite()) (it * 1000).toLong() else 0L }
-        val remote = runCatching { URI(source) }.getOrNull()
-        if (remote?.scheme != "https" || remote.host == null) return@withContext false
-        if (formatId != null && selectedFormat != formatId) return@withContext false
-        if (expectedEnd > 0 && resumeAtMs >= expectedEnd - 300) return@withContext true
+        val recording = try {
+            resolveRecording(context, link, formatId, height = 1080)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (formatId != null) throw error
+            android.util.Log.w("ClipStudioYouTube", "DASH stream resolution failed; trying the full-video importer", error)
+            return@withContext false
+        }
+        if (recording.inputs.isEmpty() || recording.inputs.size > 2) return@withContext false
+        if (recording.endMs > 0 && resumeAtMs >= recording.endMs - 300L) return@withContext true
 
         val dir = File(context.filesDir, "imports/parts-${UUID.randomUUID()}")
         check(dir.mkdirs()) { "Could not create download storage." }
         val list = File(dir, "segments.csv")
         val published = mutableSetOf<String>()
         var latestEnd = resumeAtMs
+
         suspend fun publishReady(includeTail: Boolean = false) {
             val csv = if (list.isFile) list.readText() else ""
             val rows = csv.substringBeforeLast('\n', "").lineSequence().mapNotNull(::parseSegmentRow).toList()
@@ -102,11 +106,11 @@ internal object StudioMedia {
                 if (tail && !includeTail && entry.endMs - entry.startMs < 40_000L) break
                 val file = File(dir, entry.name)
                 if (!YouTubeDownloadValidation.isValidMp4(file)) break
-                val uri = Uri.fromFile(file)
-                if (entry.startMs + resumeAtMs < latestEnd - 750) break
+                if (entry.startMs + resumeAtMs < latestEnd - 750L) break
                 val offset = entry.startMs + resumeAtMs
                 val end = entry.endMs + resumeAtMs
-                val part = SourcePart(uri, offset, duration(context, uri), end, selectedFormat)
+                val part = SourcePart(Uri.fromFile(file), offset, duration(context, Uri.fromFile(file)),
+                    end, recording.format)
                 currentCoroutineContext().ensureActive()
                 withContext(NonCancellable) {
                     onPart(part)
@@ -115,32 +119,62 @@ internal object StudioMedia {
                 }
             }
         }
+
         try {
             val complete = coroutineScope {
                 val transfer = async {
                     val seek = if (resumeAtMs == 0L) emptyList() else listOf("-ss", seconds(resumeAtMs))
-                    // Stream-copy the initial import. A restarted import needs an accurate seek
-                    // that decodes and discards preceding GOP frames before producing new parts.
+                    val inputArgs = recording.inputs.flatMapIndexed { index, stream ->
+                        val headers = if (stream.headers.isEmpty()) emptyList()
+                            else listOf("-headers", stream.headers)
+                        listOf(
+                            "-thread_queue_size", "1024",
+                            "-rw_timeout", "30000000",
+                            "-reconnect", "1",
+                            "-reconnect_streamed", "1",
+                            "-reconnect_delay_max", "5"
+                        ) + headers + seek + listOf("-i", stream.url)
+                    }
+                    val mapping = if (recording.inputs.size == 2) {
+                        listOf("-map", "0:v:0", "-map", "1:a:0")
+                    } else {
+                        listOf("-map", "0:v:0", "-map", "0:a:0")
+                    }
+                    // Initial imports are lossless stream copies. A resumed import seeks to
+                    // the saved boundary and re-encodes only the resumed portion for accuracy.
                     val codec = if (resumeAtMs == 0L) listOf("-c", "copy") else listOf(
                         "-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k",
                         "-force_key_frames", "expr:gte(t,n_forced*40)", "-c:a", "aac", "-b:a", "128k"
                     )
-                    val arguments = listOf("-nostdin", "-loglevel", "error", "-rw_timeout", "20000000") + seek +
-                        listOf("-i", source, "-map", "0:v:0", "-map", "0:a:0") + codec + listOf(
-                        "-avoid_negative_ts", "disabled", "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
-                        "-segment_format_options", "movflags=+faststart",
-                        "-segment_list", list.absolutePath, "-segment_list_type", "csv",
-                        File(dir, "part-%05d.mp4").absolutePath
-                    )
+                    val arguments = listOf("-nostdin", "-loglevel", "error") +
+                        inputArgs + listOf("-max_muxing_queue_size", "2048") + mapping + codec + listOf(
+                            "-avoid_negative_ts", "disabled",
+                            "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
+                            "-segment_format_options", "movflags=+faststart",
+                            "-segment_list", list.absolutePath, "-segment_list_type", "csv",
+                            File(dir, "part-%05d.mp4").absolutePath
+                        )
                     runFfmpeg(arguments.toTypedArray())
                 }
+                var lastSampleAt = SystemClock.elapsedRealtime()
+                var lastSampleBytes = 0L
                 while (!transfer.isCompleted) {
                     publishReady()
-                    delay(400)
+                    delay(1_000)
+                    val currentBytes = dir.listFiles().orEmpty().asSequence()
+                        .filter { it.isFile && it.name.endsWith(".mp4") }
+                        .sumOf { it.length() }
+                    val now = SystemClock.elapsedRealtime()
+                    val elapsed = (now - lastSampleAt).coerceAtLeast(1L)
+                    val speed = ((currentBytes - lastSampleBytes).coerceAtLeast(0L) * 1_000L) / elapsed
+                    onTransferProgress(speed, currentBytes)
+                    lastSampleAt = now
+                    lastSampleBytes = currentBytes
                 }
                 val success = transfer.await()
                 val last = if (list.isFile) list.readLines().lastOrNull()?.let(::parseSegmentRow) else null
-                val finished = success && (expectedEnd == 0L || last != null && resumeAtMs + last.endMs >= expectedEnd - 1800)
+                val finished = success && (recording.endMs == 0L ||
+                    last != null && resumeAtMs + last.endMs >= recording.endMs - 1_800L)
                 publishReady(includeTail = finished)
                 finished && last != null && latestEnd >= resumeAtMs + last.endMs
             }
@@ -157,22 +191,31 @@ internal object StudioMedia {
         }
     }
 
-    private data class MediaStream(val url: String, val headers: String)
-    private data class RecordingStreams(val endMs: Long, val format: String, val inputs: List<MediaStream>)
+    private data class MediaStream(val url: String, val headers: String, val seekOffsetMs: Long? = null)
+    private data class RecordingStreams(
+        val endMs: Long, val format: String, val inputs: List<MediaStream>,
+        val dashTracks: List<IndexedDashTrack> = emptyList()
+    )
 
     private fun JSONObject.requestHeaders(): Map<String, String> = optJSONObject("http_headers")?.let { headers ->
         headers.keys().asSequence().associateWith { headers.optString(it) }
     }.orEmpty()
 
     private suspend fun resolveRecording(
-        context: Context, link: String, previousFormat: String?, audioOnly: Boolean = false, height: Int = 1080
+        context: Context, link: String, previousFormat: String?, audioOnly: Boolean = false, height: Int = 1080,
+        indexedDash: Boolean = false
     ): RecordingStreams {
         val id = YouTubeLinkClassifier.parseVideoId(link)
         val media = runInterruptible {
             YouTubeVideoImporter.prepare(context)
-            val format = if (audioOnly) "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]" else previousFormat?.also {
+            val format = if (audioOnly) {
+                "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]"
+            } else previousFormat?.also {
                 check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
-            } ?: recordingFormatSelector(height)
+            } ?: if (indexedDash) {
+                // DASH fragment formats use http_dash_segments rather than the direct HTTPS protocol.
+                recordingFormatSelector(height).replace("[protocol=https]", "[protocol=http_dash_segments]")
+            } else recordingFormatSelector(height)
             val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$id")
                 .addOption("--no-playlist")
                 .addOption("--no-warnings")
@@ -180,6 +223,7 @@ internal object StudioMedia {
                 .addOption("--socket-timeout", 20)
                 .addOption("--dump-single-json")
                 .addOption("-f", format)
+            if (indexedDash) request.addOption("--extractor-args", "youtube:formats=dashy")
             JSONObject(YoutubeDL.execute(request).out.trim())
         }
         when (media.optString("live_status")) {
@@ -205,7 +249,12 @@ internal object StudioMedia {
         }
         check(audioOnly || available.size == inputs.size) { "No compatible video and audio streams were available for this recording." }
 
-        return RecordingStreams(durationMs, selectedFormat, available)
+        val dashTracks = if (indexedDash) {
+            IndexedDashPlanner.parseSelectedFormats(media).orEmpty().map { track ->
+                track.copy(headers = media.requestHeaders() + track.headers)
+            }
+        } else emptyList()
+        return RecordingStreams(durationMs, selectedFormat, available, dashTracks)
     }
 
     suspend fun scanRecording(
@@ -275,14 +324,14 @@ internal object StudioMedia {
 
     /** Use the standard full downloader once, then prepare one local range at a time. */
     suspend fun preparePartFromFull(
-        context: Context, projectId: String, link: String, startMs: Long,
+        context: Context, projectId: String, link: String, startMs: Long, height: Int = 1080,
         downloading: (Int) -> Unit, cutting: (Int) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
     ) = withContext(Dispatchers.IO) {
         val source = guidedFullFile(context, projectId)
         if (!YouTubeDownloadValidation.isValidMp4(source)) {
             check(source.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "Could not create download storage." }
             downloading(0)
-            val downloaded = YouTubeVideoImporter.download(context, link, 1080, downloading)
+            val downloaded = YouTubeVideoImporter.download(context, link, height, onProgress = downloading)
             val file = File(requireNotNull(downloaded.path))
             check(file.renameTo(source)) {
                 file.delete()
@@ -315,19 +364,21 @@ internal object StudioMedia {
     }
 
     private suspend fun resolveGuidedRecording(
-        context: Context, link: String, preferredFormat: String?, quality: DownloadQuality?
+        context: Context, link: String, preferredFormat: String?, quality: DownloadQuality?, indexedDash: Boolean = true
     ): RecordingStreams {
         val height = quality?.maxHeight ?: 1080
         if (preferredFormat != null) {
             try {
-                withTimeoutOrNull(35_000) { resolveRecording(context, link, preferredFormat, height = height) }?.let { return it }
+                withTimeoutOrNull(35_000) {
+                    resolveRecording(context, link, preferredFormat, height = height, indexedDash = indexedDash)
+                }?.let { return it }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 // Formats can change between scans. Normalized chunks can still be reused.
             }
         }
-        return withTimeoutOrNull(60_000) { resolveRecording(context, link, null, height = height) }
+        return withTimeoutOrNull(60_000) { resolveRecording(context, link, null, height = height, indexedDash = indexedDash) }
             ?: error("Could not open the video range. Retry this part when your connection is stable.")
     }
 
@@ -360,16 +411,32 @@ internal object StudioMedia {
         }
         files.save(plan)
         val publishedDuration = recordingDuration(context, files.output, range.lengthMs, requireAudio = true)
-        val tryFast = fast && publishedDuration == null && chunks.indices.none { files.chunk(it).isFile }
-        val copied = if (tryFast) {
-            val streams = recording ?: resolveGuidedRecording(context, link, plan.format, quality).also { recording = it }
-            check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
-            plan = plan.copy(format = streams.format)
-            files.save(plan)
-            copyRecordingRange(context, link, plan, files, progress)
-        } else false
-        if (tryFast && !copied) progress(GuidedDownloadProgress(0, null, newAttempt = true))
-        if (publishedDuration == null && !copied) {
+        var indexedReady = publishedDuration != null
+        if (publishedDuration == null) {
+            val indexedStreams = recording ?: try {
+                resolveGuidedRecording(context, link, plan.format, quality, indexedDash = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            if (indexedStreams?.dashTracks?.isNotEmpty() == true) {
+                recording = indexedStreams
+                indexedReady = try {
+                    downloadIndexedRange(context, directory, indexedStreams.dashTracks, range, quality, fast, progress)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    android.util.Log.w("ClipStudioYouTube", "Indexed DASH range failed; retrying with the range-only FFmpeg downloader", error)
+                    recording = null
+                    false
+                }
+            } else {
+                // Do not pass a DASH-only format id into the non-DASH compatibility path.
+                recording = null
+            }
+        }
+        if (publishedDuration == null && !indexedReady) {
             files.output.delete()
             var tracks: RecordingTracks? = null
             val completed = chunks.mapIndexed { index, chunk ->
@@ -383,61 +450,163 @@ internal object StudioMedia {
                 ready
             }
             val saved = chunks.zip(completed).sumOf { (chunk, ready) -> if (ready) chunk.lengthMs else 0L }
-            var processed = saved
-            val started = SystemClock.elapsedRealtime()
-            progress(guidedDownloadProgress(range.lengthMs, saved, processed, 0))
-            var useSectionDownloader = false
-            try {
-                for ((index, chunk) in chunks.withIndex()) {
-                    if (completed[index]) continue
-                    currentCoroutineContext().ensureActive()
-                    val streams = recording ?: resolveGuidedRecording(context, link, plan.format, quality).also { recording = it }
-                    if (streams.format != plan.format) {
-                        plan = plan.copy(format = streams.format)
-                        files.save(plan)
-                    }
-                    check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
-                    files.staging.delete()
-                    val chunkBytes = downloadStagingBytes(chunk.lengthMs, videoKbps)
-                    checkDownloadSpace(directory, chunkBytes * if (useSectionDownloader) 2 else 1)
-                    val beforeChunk = processed
-                    val report: (Long) -> Unit = { time ->
-                        progress(guidedDownloadProgress(range.lengthMs, saved, beforeChunk + time,
-                            SystemClock.elapsedRealtime() - started))
-                    }
-                    if (!useSectionDownloader) {
-                        useSectionDownloader = !encodeRecordingChunk(context, streams.inputs, chunk.startMs,
-                            chunk.lengthMs, files.staging, remote = true, tracks = tracks, videoKbps = videoKbps, progress = report)
-                    }
-                    if (useSectionDownloader) {
-                        checkDownloadSpace(directory, chunkBytes * 2)
-                        downloadAndNormalizeSection(context, link, streams.format, chunk, files.staging, tracks, videoKbps, report)
-                    }
-                    check(files.staging.renameTo(files.chunk(index))) { "Could not save the downloaded piece." }
-                    if (tracks == null) {
-                        tracks = FastMedia.downloadedTracks(context, Uri.fromFile(files.chunk(index)), requireAudio = true)
-                    }
-                    processed += chunk.lengthMs
-                    progress(guidedDownloadProgress(range.lengthMs, saved, processed, SystemClock.elapsedRealtime() - started))
+            val trackReference = AtomicReference<RecordingTracks?>(tracks)
+            val chunkProgress = AtomicLongArray(chunks.size)
+            val chunkSpeeds = AtomicLongArray(chunks.size)
+            val chunkBytes = AtomicLongArray(chunks.size)
+            val chunkSampleTimes = AtomicLongArray(chunks.size)
+            for (index in chunks.indices) {
+                if (completed[index]) {
+                    chunkProgress.set(index, chunks[index].lengthMs)
+                    chunkBytes.set(index, files.chunk(index).length())
                 }
-                progress(GuidedDownloadProgress(100, null, assembling = true))
-                if (chunks.size == 1) {
-                    check(files.chunk(0).renameTo(files.output)) { "Could not save the completed range. Retry to reuse it." }
-                } else {
-                    checkDownloadSpace(directory, chunks.indices.sumOf { files.chunk(it).length() })
-                    files.concatList.writeText(buildString {
-                        appendLine("ffconcat version 1.0")
-                        chunks.indices.forEach { index -> appendLine("file ${files.chunk(index).name}") }
-                    })
-                    check(runFfmpeg(arrayOf("-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-safe", "1",
-                        "-i", files.concatList.absolutePath, "-c", "copy", "-movflags", "+faststart", files.staging.absolutePath)) &&
-                        recordingDuration(context, files.staging, range.lengthMs, requireAudio = true) != null && files.staging.renameTo(files.output)
-                    ) { "Could not assemble this part. Retry to reuse the downloaded pieces." }
-                }
-            } finally {
-                files.staging.delete()
-                files.concatList.delete()
             }
+
+            val started = SystemClock.elapsedRealtime()
+            val parallelism = guidedDownloadConcurrency(fast)
+            val pending = chunks.indices.filterNot { completed[it] }
+            if (pending.isNotEmpty()) {
+                val peakStagingBytes = pending.take(parallelism).sumOf { index ->
+                    downloadStagingBytes(chunks[index].lengthMs, videoKbps) * 2L
+                }
+                checkDownloadSpace(directory, peakStagingBytes)
+
+                val streams = recording
+                    ?: resolveGuidedRecording(context, link, plan.format, quality, indexedDash = false).also { recording = it }
+                if (streams.format != plan.format) {
+                    plan = plan.copy(format = streams.format)
+                    files.save(plan)
+                }
+                check(streams.endMs >= range.endMs) {
+                    "The recording is now shorter than this part. Saved pieces were kept."
+                }
+
+                fun report(index: Int, timeMs: Long) {
+                    val requestedTime = timeMs.coerceIn(0L, chunks[index].lengthMs)
+                    while (true) {
+                        val previous = chunkProgress.get(index)
+                        if (requestedTime <= previous || chunkProgress.compareAndSet(index, previous, requestedTime)) break
+                    }
+                    var processedMs = 0L
+                    var receivedBytes = 0L
+                    var bytesPerSecond = 0L
+                    for (position in chunks.indices) {
+                        processedMs += chunkProgress.get(position)
+                        receivedBytes += chunkBytes.get(position)
+                        bytesPerSecond += chunkSpeeds.get(position)
+                    }
+                    progress(
+                        guidedDownloadProgress(
+                            range.lengthMs, saved, processedMs, SystemClock.elapsedRealtime() - started
+                        ).copy(
+                            bytesFetched = receivedBytes,
+                            bytesPerSecond = bytesPerSecond.takeIf { it > 0L }
+                        )
+                    )
+                }
+
+                val semaphore = Semaphore(parallelism)
+                coroutineScope {
+                    pending.map { index ->
+                        async {
+                            semaphore.withPermit {
+                                currentCoroutineContext().ensureActive()
+                                val chunk = chunks[index]
+                                checkDownloadSpace(directory, downloadStagingBytes(chunk.lengthMs, videoKbps) * 2L)
+                                val staging = files.stagingChunk(index)
+                                staging.delete()
+                                try {
+                                    downloadAndNormalizeSection(
+                                        context = context,
+                                        link = link,
+                                        format = streams.format,
+                                        range = chunk,
+                                        output = staging,
+                                        tracks = trackReference.get(),
+                                        videoKbps = videoKbps,
+                                        encoderThreads = 1,
+                                        onSpeed = { speed ->
+                                            chunkSpeeds.set(index, speed.coerceAtLeast(0L))
+                                            report(index, chunkProgress.get(index))
+                                        },
+                                        onBytesFetched = { bytes ->
+                                            val now = SystemClock.elapsedRealtime()
+                                            val currentBytes = bytes.coerceAtLeast(0L)
+                                            val previousBytes = chunkBytes.getAndSet(index, currentBytes)
+                                            val previousAt = chunkSampleTimes.getAndSet(index, now)
+                                            if (previousAt > 0L && currentBytes > previousBytes) {
+                                                val elapsed = (now - previousAt).coerceAtLeast(1L)
+                                                val measured = ((currentBytes - previousBytes) * 1_000L) / elapsed
+                                                chunkSpeeds.set(index, measured)
+                                            }
+                                            // FFmpeg may not expose a usable percentage through the wrapper.
+                                            // Estimate transfer progress from received bytes, capped at the
+                                            // download stage's 75% share until local normalization completes.
+                                            val estimatedBytes = downloadOutputBytes(chunk.lengthMs, videoKbps).coerceAtLeast(1L)
+                                            val transferMs = (minOf(currentBytes, estimatedBytes).toDouble() /
+                                                estimatedBytes * chunk.lengthMs * 0.75).toLong()
+                                            report(index, maxOf(chunkProgress.get(index), transferMs))
+                                        },
+                                        progress = { time -> report(index, time) }
+                                    )
+                                    check(staging.isFile && staging.length() > 0L) {
+                                        "The downloaded section was empty. Retry this part; saved pieces were kept."
+                                    }
+                                    check(staging.renameTo(files.chunk(index))) {
+                                        "Could not save part section ${index + 1}. Retry to reuse completed sections."
+                                    }
+                                    val actualTracks = FastMedia.downloadedTracks(
+                                        context, Uri.fromFile(files.chunk(index)), requireAudio = true
+                                    )
+                                    check(actualTracks != null) { "A downloaded section has no usable video/audio tracks." }
+                                    val baseline = trackReference.get()
+                                    if (baseline == null) {
+                                        trackReference.compareAndSet(null, actualTracks)
+                                    } else {
+                                        check(baseline == actualTracks) {
+                                            "A downloaded section has different media settings. Saved pieces were kept."
+                                        }
+                                    }
+                                    chunkSpeeds.set(index, 0L)
+                                    chunkProgress.set(index, chunk.lengthMs)
+                                    report(index, chunk.lengthMs)
+                                } finally {
+                                    chunkSpeeds.set(index, 0L)
+                                    staging.delete()
+                                    report(index, chunkProgress.get(index))
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+                tracks = trackReference.get()
+            }
+
+            progress(GuidedDownloadProgress(
+                100, null, assembling = true,
+                bytesFetched = (0 until chunks.size).sumOf { chunkBytes.get(it) }
+            ))
+            if (chunks.size == 1) {
+                check(files.chunk(0).renameTo(files.output)) {
+                    "Could not save the completed range. Retry to reuse it."
+                }
+            } else {
+                checkDownloadSpace(directory, chunks.indices.sumOf { files.chunk(it).length() })
+                files.concatList.writeText(buildString {
+                    appendLine("ffconcat version 1.0")
+                    chunks.indices.forEach { index -> appendLine("file ${files.chunk(index).name}") }
+                })
+                check(runFfmpeg(arrayOf(
+                    "-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-safe", "1",
+                    "-i", files.concatList.absolutePath, "-c", "copy", "-movflags", "+faststart",
+                    files.staging.absolutePath
+                )) &&
+                    recordingDuration(context, files.staging, range.lengthMs, requireAudio = true) != null &&
+                    files.staging.renameTo(files.output)
+                ) { "Could not assemble this part. Retry to reuse the downloaded pieces." }
+            }
+            files.staging.delete()
+            files.concatList.delete()
         }
         val url = Uri.fromFile(files.output)
         val actualDuration = publishedDuration ?: duration(context, url)
@@ -445,6 +614,86 @@ internal object StudioMedia {
         withContext(NonCancellable) {
             publish(SourcePart(url, range.startMs, actualDuration, range.endMs, recording?.format ?: plan.format, downloadQuality = quality), range.endMs == plan.recordingEndMs)
             chunks.indices.forEach { files.chunk(it).delete() }
+            File(directory, "indexed").deleteRecursively()
+        }
+    }
+
+    private suspend fun downloadIndexedRange(
+        context: Context, directory: File, tracks: List<IndexedDashTrack>, range: RecordingPartWindow,
+        quality: DownloadQuality?, fast: Boolean, progress: (GuidedDownloadProgress) -> Unit
+    ): Boolean {
+        val indexedDirectory = File(directory, "indexed")
+        val started = SystemClock.elapsedRealtime()
+        var lastSampleAt = started
+        var lastSampleBytes = 0L
+        val videoKbps = quality?.videoKbps ?: 4_500
+        checkDownloadSpace(directory, downloadStagingBytes(range.lengthMs, videoKbps) * 2L)
+        progress(GuidedDownloadProgress(0, null, bytesFetched = 0L))
+        val localTracks = IndexedDashDownloader.download(
+            tracks = tracks,
+            startMs = range.startMs,
+            endMs = range.endMs,
+            directory = indexedDirectory,
+            parallelism = indexedDashParallelism(fast),
+            onBytesFetched = { bytes ->
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = (now - lastSampleAt).coerceAtLeast(1L)
+                val speed = if (bytes > lastSampleBytes) ((bytes - lastSampleBytes) * 1_000L) / elapsed else 0L
+                lastSampleAt = now
+                lastSampleBytes = bytes
+                progress(GuidedDownloadProgress(0, null, bytesFetched = bytes, bytesPerSecond = speed.takeIf { it > 0L }))
+            }
+        )
+        check(localTracks.isNotEmpty()) { "No selected DASH media fragments were downloaded." }
+        progress(GuidedDownloadProgress(75, null, assembling = true,
+            bytesFetched = localTracks.sumOf { it.length() }))
+        val inputs = localTracks.mapIndexed { index, file ->
+            val firstSelected = tracks[index].mediaFor(range.startMs, range.endMs).first().startMs
+            MediaStream(file.absolutePath, "", seekOffsetMs = (range.startMs - firstSelected).coerceAtLeast(0L))
+        }
+        val staging = File(directory, "indexed-part-writing.mp4")
+        staging.delete()
+        try {
+            val inputArgs = inputs.flatMap { stream ->
+                val seekOffset = stream.seekOffsetMs ?: 0L
+                val seek = if (seekOffset == 0L) emptyList() else listOf("-ss", seconds(seekOffset))
+                seek + listOf("-i", stream.url)
+            }
+            val copyBoundaryAligned = tracks.indices.all { index ->
+                val selected = tracks[index].mediaFor(range.startMs, range.endMs)
+                selected.isNotEmpty() && selected.first().startMs == range.startMs &&
+                    selected.last().endMs == range.endMs
+            }
+            val copyArguments = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + listOf(
+                "-t", seconds(range.lengthMs),
+                "-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0",
+                "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
+                staging.absolutePath
+            )
+            val copied = copyBoundaryAligned && runFfmpeg(copyArguments.toTypedArray()) &&
+                recordingDuration(context, staging, range.lengthMs, requireAudio = true)
+                    ?.let { abs(it - range.lengthMs) <= 350L } == true
+            val encoded = if (copied) true else {
+                staging.delete()
+                encodeRecordingChunk(
+                    context, inputs, 0L, range.lengthMs, staging, remote = false,
+                    videoKbps = videoKbps, encoderThreads = 2
+                ) { time ->
+                    val percent = 75 + (time * 25 / range.lengthMs.coerceAtLeast(1L)).toInt().coerceIn(0, 24)
+                    progress(GuidedDownloadProgress(percent, null, assembling = true,
+                        bytesFetched = localTracks.sumOf { it.length() }))
+                }
+            }
+            check(encoded && recordingDuration(context, staging, range.lengthMs, requireAudio = true) != null) {
+                "The selected DASH fragments downloaded, but the requested MP4 range could not be assembled."
+            }
+            val output = File(directory, "part.mp4")
+            output.delete()
+            check(staging.renameTo(output)) { "Could not save the assembled DASH range." }
+            progress(GuidedDownloadProgress(100, null, bytesFetched = localTracks.sumOf { it.length() }))
+            return true
+        } finally {
+            staging.delete()
         }
     }
 
@@ -509,14 +758,19 @@ internal object StudioMedia {
 
     private suspend fun downloadAndNormalizeSection(
         context: Context, link: String, format: String, range: RecordingPartWindow, output: File,
-        tracks: RecordingTracks?, videoKbps: Int, progress: (Long) -> Unit
+        tracks: RecordingTracks?, videoKbps: Int, encoderThreads: Int = 2,
+        onSpeed: (Long) -> Unit = {}, onBytesFetched: (Long) -> Unit = {},
+        progress: (Long) -> Unit
     ) {
-        val staging = File(output.parentFile, "section-download")
+        val staging = File(output.parentFile, "section-download-${output.nameWithoutExtension}")
         staging.deleteRecursively()
         check(staging.mkdir()) { "Could not prepare storage for this part." }
         try {
             val section = try {
-                YouTubeVideoImporter.downloadSection(context, link, format, range, staging) { progress(it * 3 / 4) }
+                YouTubeVideoImporter.downloadSection(
+                    context, link, format, range, staging, copyTracks = true,
+                    onSpeed = onSpeed, onBytesFetched = onBytesFetched
+                ) { progress(it * 3 / 4) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: com.yausername.youtubedl_android.YoutubeDLException) {
@@ -524,11 +778,22 @@ internal object StudioMedia {
                     "YouTube refused the requested video range." else "The alternate downloader could not fetch this range."
                 error("$message Saved pieces were kept. Retry this part or use full import.")
             }
-            check(recordingDuration(context, section, range.lengthMs) != null) {
+            val actualDuration = recordingDuration(context, section, range.lengthMs, requireAudio = true)
+            val copyReady = actualDuration != null && abs(actualDuration - range.lengthMs) <= 350L &&
+                FastMedia.matchesDownloadedPart(context, Uri.fromFile(section))
+            if (copyReady) {
+                check(section.renameTo(output)) { "Could not save the downloaded section. Saved pieces were kept." }
+                progress(range.lengthMs)
+                return
+            }
+            check(actualDuration != null) {
                 "The alternate downloader returned an incomplete range. Saved pieces were kept."
             }
-            check(encodeRecordingChunk(context, listOf(MediaStream(section.absolutePath, "")),
-                0L, range.lengthMs, output, remote = false, tracks = tracks, videoKbps = videoKbps) { progress(range.lengthMs * 3 / 4 + it / 4) }) {
+            check(encodeRecordingChunk(
+                context, listOf(MediaStream(section.absolutePath, "")), 0L, range.lengthMs,
+                output, remote = false, tracks = tracks, videoKbps = videoKbps,
+                encoderThreads = encoderThreads
+            ) { progress(range.lengthMs * 3 / 4 + it / 4) }) {
                 "The range downloaded but could not be converted to MP4. Saved pieces were kept."
             }
         } finally {
@@ -538,15 +803,18 @@ internal object StudioMedia {
 
     private suspend fun encodeRecordingChunk(
         context: Context, inputs: List<MediaStream>, startMs: Long, lengthMs: Long, output: File,
-        remote: Boolean, tracks: RecordingTracks? = null, videoKbps: Int = 4_500, progress: (Long) -> Unit
+        remote: Boolean, tracks: RecordingTracks? = null, videoKbps: Int = 4_500,
+        encoderThreads: Int = 2, progress: (Long) -> Unit
     ): Boolean {
-        val seek = if (startMs == 0L) emptyList() else listOf("-ss", seconds(startMs))
         val inputArgs = inputs.flatMap { stream ->
             val network = if (remote) listOf("-rw_timeout", "30000000") else emptyList()
             val headers = if (stream.headers.isEmpty()) emptyList() else listOf("-headers", stream.headers)
+            val seekOffset = stream.seekOffsetMs ?: startMs
+            val seek = if (seekOffset == 0L) emptyList() else listOf("-ss", seconds(seekOffset))
             network + headers + seek + listOf("-i", stream.url)
         }
-        val codec = listOf("-threads", "2", "-c:v", "libopenh264", "-b:v", "${videoKbps}k", "-pix_fmt", "yuv420p",
+        val codec = listOf("-threads", encoderThreads.coerceIn(1, 4).toString(),
+            "-c:v", "libopenh264", "-b:v", "${videoKbps}k", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart")
         val scale = tracks?.let { listOf("-vf", "scale=${it.width}:${it.height}") }.orEmpty()
         val audioSettings = tracks?.sampleRate?.let { listOf("-ar", it.toString()) }.orEmpty() +

@@ -62,3 +62,23 @@ internal fun mediaRequestHeaders(vararg sources: Map<String, String>): String {
     }
     return headers.entries.joinToString("") { (name, value) -> "$name: $value\r\n" }
 }
+
+
+/** Convert yt-dlp's human-readable transfer rate to bytes per second for diagnostics/UI. */
+internal fun parseDownloadSpeedBytes(line: String): Long? {
+    val match = Regex("""\bat\s+([0-9]+(?:\.[0-9]+)?)\s*(B|KiB|MiB|GiB|KB|MB|GB)/s""",
+        RegexOption.IGNORE_CASE).find(line) ?: return null
+    val value = match.groupValues[1].toDoubleOrNull() ?: return null
+    val unit = match.groupValues[2].lowercase(java.util.Locale.ROOT)
+    val multiplier = when (unit) {
+        "b" -> 1.0
+        "kib" -> 1024.0
+        "mib" -> 1024.0 * 1024.0
+        "gib" -> 1024.0 * 1024.0 * 1024.0
+        "kb" -> 1_000.0
+        "mb" -> 1_000_000.0
+        "gb" -> 1_000_000_000.0
+        else -> return null
+    }
+    return (value * multiplier).toLong().takeIf { it >= 0L }
+}
