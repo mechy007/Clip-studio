@@ -98,6 +98,7 @@ internal object IndexedDashDownloader {
                 check(staging.isFile && staging.length() > 0L) {
                     "The selected DASH fragments could not be assembled."
                 }
+                output.delete()
                 check(staging.renameTo(output)) { "Could not assemble the selected DASH media fragments." }
                 outputs += output
             } finally {
