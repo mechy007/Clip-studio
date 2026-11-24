@@ -41,6 +41,7 @@ internal data class StudioState(
     val guidedExportRevision: Int = 0,
     val storageWarning: String? = null,
     val playback: Pair<ExportClip, Uri>? = null,
+    val playbackSampleOnly: Boolean = false,
     val queueExportActive: Boolean = false,
     val finishingPart: Boolean = false,
     val exportingClip: ExportClip? = null,
@@ -60,7 +61,8 @@ internal data class ExportClip(
     val enhanceFacecam: Boolean = false,
     val captionPosition: CaptionPosition = CaptionPosition.LOWER,
     val captionSize: Int = 100,
-    val enhancement: VideoEnhancement = VideoEnhancement.OFF
+    val enhancement: VideoEnhancement = VideoEnhancement.OFF,
+    val facecamRescue: Boolean = true
 )
 
 internal object StudioSession {
@@ -334,15 +336,15 @@ internal object StudioSession {
         }
     }
 
-    fun preview(context: Context, clip: ExportClip) = work(context, Work.PREVIEW, "Rendering playback preview") { app ->
-        val uri = StudioMedia.preview(app, clip)
+    fun preview(context: Context, clip: ExportClip, sampleOnly: Boolean = false) = work(context, Work.PREVIEW, "Rendering playback preview") { app ->
+        val uri = StudioMedia.preview(app, clip, sampleOnly)
         clearPlayback()
-        update { it.copy(playback = clip to uri) }
+        update { it.copy(playback = clip to uri, playbackSampleOnly = sampleOnly) }
     }
 
     private fun clearPlayback() {
         state.value.playback?.second?.path?.let { File(it).delete() }
-        update { it.copy(playback = null) }
+        update { it.copy(playback = null, playbackSampleOnly = false) }
     }
 
     fun analyze(context: Context) {
