@@ -412,6 +412,7 @@ internal object StudioMedia {
             val chunkProgress = AtomicLongArray(chunks.size)
             val chunkSpeeds = AtomicLongArray(chunks.size)
             val chunkBytes = AtomicLongArray(chunks.size)
+            val chunkSampleTimes = AtomicLongArray(chunks.size)
             for (index in chunks.indices) {
                 if (completed[index]) {
                     chunkProgress.set(index, chunks[index].lengthMs)
@@ -439,7 +440,11 @@ internal object StudioMedia {
                 }
 
                 fun report(index: Int, timeMs: Long) {
-                    chunkProgress.set(index, timeMs.coerceIn(0L, chunks[index].lengthMs))
+                    val requestedTime = timeMs.coerceIn(0L, chunks[index].lengthMs)
+                    while (true) {
+                        val previous = chunkProgress.get(index)
+                        if (requestedTime <= previous || chunkProgress.compareAndSet(index, previous, requestedTime)) break
+                    }
                     var processedMs = 0L
                     var receivedBytes = 0L
                     var bytesPerSecond = 0L
@@ -483,8 +488,22 @@ internal object StudioMedia {
                                             report(index, chunkProgress.get(index))
                                         },
                                         onBytesFetched = { bytes ->
-                                            chunkBytes.set(index, bytes.coerceAtLeast(0L))
-                                            report(index, chunkProgress.get(index))
+                                            val now = SystemClock.elapsedRealtime()
+                                            val currentBytes = bytes.coerceAtLeast(0L)
+                                            val previousBytes = chunkBytes.getAndSet(index, currentBytes)
+                                            val previousAt = chunkSampleTimes.getAndSet(index, now)
+                                            if (previousAt > 0L && currentBytes > previousBytes) {
+                                                val elapsed = (now - previousAt).coerceAtLeast(1L)
+                                                val measured = ((currentBytes - previousBytes) * 1_000L) / elapsed
+                                                chunkSpeeds.set(index, measured)
+                                            }
+                                            // FFmpeg may not expose a usable percentage through the wrapper.
+                                            // Estimate transfer progress from received bytes, capped at the
+                                            // download stage's 75% share until local normalization completes.
+                                            val estimatedBytes = downloadOutputBytes(chunk.lengthMs, videoKbps).coerceAtLeast(1L)
+                                            val transferMs = (minOf(currentBytes, estimatedBytes).toDouble() /
+                                                estimatedBytes * chunk.lengthMs * 0.75).toLong()
+                                            report(index, maxOf(chunkProgress.get(index), transferMs))
                                         },
                                         progress = { time -> report(index, time) }
                                     )
