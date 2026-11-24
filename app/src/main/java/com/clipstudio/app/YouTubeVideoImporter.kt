@@ -45,7 +45,12 @@ object YouTubeVideoImporter {
                     .addOption("--no-playlist")
                     .addOption("--match-filter", "!is_live & !is_upcoming")
                     .addOption("--socket-timeout", 30)
-                    .addOption("--retries", 2)
+                    // yt-dlp defaults to one DASH/HLS fragment at a time. A modest
+                    // parallelism improves throughput without overwhelming mobile devices.
+                    .addOption("--concurrent-fragments", 4)
+                    .addOption("--buffer-size", "64K")
+                    .addOption("--retries", 3)
+                    .addOption("--fragment-retries", 8)
                     .addOption("-f", format)
                     .addOption("--download-sections", bounds)
                     .addOption("--merge-output-format", "mp4")
@@ -83,8 +88,12 @@ object YouTubeVideoImporter {
                     .addOption("--no-playlist")
                     .addOption("--match-filter", "!is_live & !is_upcoming")
                     .addOption("--socket-timeout", 30)
+                    // Parallel fragment fetching avoids serial DASH/HLS downloads.
+                    // Four workers are a conservative default for Android/mobile networks.
+                    .addOption("--concurrent-fragments", 4)
+                    .addOption("--buffer-size", "64K")
                     .addOption("--retries", 3)
-                    .addOption("--fragment-retries", 3)
+                    .addOption("--fragment-retries", 8)
                     .addOption("-f", "bv*[height<=$height]+ba/b[height<=$height]/best")
                     .addOption("--merge-output-format", "mp4")
                     .addOption("-o", File(staging, "video.%(ext)s").absolutePath)
