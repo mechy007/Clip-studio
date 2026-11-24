@@ -266,13 +266,22 @@ internal object StudioSession {
                         if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true || revision != guidedProgressRevision) return@launch
                         val current = state.value.guidedDownload
                         if (!progress.newAttempt && (current?.assembling == true || progress.percent < (current?.percent ?: 0))) return@launch
-                        val label = if (progress.newAttempt) "Trying resumable download for $partLabel"
+                        val transferDetails = buildString {
+                            progress.bytesFetched?.takeIf { it > 0L }?.let {
+                                append(" · ${android.text.format.Formatter.formatFileSize(app, it)} received")
+                            }
+                            progress.bytesPerSecond?.takeIf { it > 0L }?.let {
+                                append(" · ${android.text.format.Formatter.formatShortFileSize(app, it)}/s")
+                            }
+                        }
+                        val label = if (progress.newAttempt) "Downloading part sections in parallel for $partLabel"
                         else if (progress.assembling) "Assembling $partLabel" else if (progress.percent == 0 && progress.bytesFetched != null) {
-                            if (progress.bytesFetched == 0L) "Connecting for $partLabel"
-                            else "Downloading $partLabel · ${android.text.format.Formatter.formatFileSize(app, progress.bytesFetched)} received"
-                        } else if (progress.percent == 0) "Preparing download for $partLabel" else buildString {
+                            if (progress.bytesFetched == 0L) "Connecting for $partLabel$transferDetails"
+                            else "Downloading $partLabel$transferDetails"
+                        } else if (progress.percent == 0) "Preparing download for $partLabel$transferDetails" else buildString {
                             append("Downloading $partLabel · ${progress.percent}%")
                             progress.etaMs?.let { append(" · about ${timestamp(it)} left") }
+                            append(transferDetails)
                         }
                         update { it.copy(guidedDownload = progress, jobs = it.jobs + (Work.IMPORT to label)) }
                     }

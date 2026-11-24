@@ -33,7 +33,10 @@ object YouTubeVideoImporter {
 
     internal suspend fun downloadSection(
         context: Context, link: String, format: String, range: RecordingPartWindow, directory: File,
-        copyTracks: Boolean = false, progress: (Long) -> Unit
+        copyTracks: Boolean = false,
+        onSpeed: (Long) -> Unit = {},
+        onBytesFetched: (Long) -> Unit = {},
+        progress: (Long) -> Unit
     ): File {
         val processId = UUID.randomUUID().toString()
         try {
@@ -61,9 +64,13 @@ object YouTubeVideoImporter {
                 } else {
                     request.addOption("--force-keyframes-at-cuts")
                 }
-                YoutubeDL.execute(request, processId, false) { percent, _, _ ->
+                YoutubeDL.execute(request, processId, false) { percent, _, line ->
                     if (percent >= 0) progress((range.lengthMs * percent.toDouble().coerceIn(0.0, 95.0) / 100).toLong())
+                    parseDownloadSpeedBytes(line)?.let(onSpeed)
+                    val partial = File(target.absolutePath + ".part")
+                    onBytesFetched(maxOf(target.length(), partial.length()))
                 }
+                onBytesFetched(target.length())
                 target
             }
         } catch (cancelled: CancellationException) {
