@@ -40,9 +40,17 @@ internal object IndexedDashPlanner {
         val base = format.optString("fragment_base_url").takeIf(String::isNotBlank)
             ?: format.optString("url").takeIf(String::isNotBlank)
             ?: return null
-        val parsed = ArrayList<IndexedDashFragment>(rawFragments.length())
+        val parsed = ArrayList<IndexedDashFragment>(rawFragments.length() + 1)
         var timelineMs = 0L
         var initializationSeen = false
+        val initializationUrl = format.optString("initialization_url").takeIf(String::isNotBlank)
+        if (initializationUrl != null) {
+            val resolved = resolveUrl(base, initializationUrl) ?: return null
+            val uri = runCatching { URI(resolved) }.getOrNull() ?: return null
+            if (uri.scheme != "https" || uri.host.isNullOrBlank()) return null
+            parsed += IndexedDashFragment(-1, resolved, 0L, 0L, initialization = true)
+            initializationSeen = true
+        }
 
         for (index in 0 until rawFragments.length()) {
             val fragment = rawFragments.optJSONObject(index) ?: return null
@@ -56,7 +64,8 @@ internal object IndexedDashPlanner {
             val durationSeconds = fragment.optDouble("duration", Double.NaN)
             val hasDuration = durationSeconds.isFinite() && durationSeconds > 0.0
             if (!hasDuration) {
-                if (initializationSeen || parsed.isNotEmpty()) return null
+                if (initializationSeen) continue
+                if (parsed.isNotEmpty()) return null
                 initializationSeen = true
                 parsed += IndexedDashFragment(index, resolved, 0L, 0L, initialization = true)
             } else {
