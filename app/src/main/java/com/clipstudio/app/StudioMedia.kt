@@ -217,8 +217,8 @@ internal object StudioMedia {
                 }
             }
             return parseRecordingDurationMs(
-                media.optDouble("duration", Double.NaN).takeIf { it.isFinite() },
-                media.optString("duration_string").takeIf { it.isNotBlank() },
+                item.optDouble("duration", Double.NaN).takeIf { it.isFinite() },
+                item.optString("duration_string").takeIf { it.isNotBlank() },
                 formatDurations
             )
         }
