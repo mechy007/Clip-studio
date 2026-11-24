@@ -1,6 +1,15 @@
 package com.clipstudio.app
 
 import android.media.MediaMetadataRetriever
+import android.os.StatFs
+import android.text.format.Formatter
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import android.os.Build
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -39,6 +48,33 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+internal enum class StudioRecipe(val title: String, val layout: Layout, val captions: CaptionPreset, val detail: String) {
+    Reaction("Streamer reaction", Layout.Split, CaptionPreset.POP, "50/50 facecam · Pop captions · Normalize audio"),
+    Gameplay("Gameplay short", Layout.Fill, CaptionPreset.KARAOKE, "Vertical fill · Karaoke captions"),
+    SquarePost("Square cut", Layout.Square, CaptionPreset.BOXED, "Square frame · Boxed captions")
+}
+
+@Composable
+internal fun StudioStorage() {
+    val context = LocalContext.current
+    val capacity by produceState<Pair<Long, Long>?>(null) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { StatFs(context.filesDir.path).let { it.availableBytes to it.totalBytes } }.getOrNull()
+        }
+    }
+    capacity?.let { (free, total) ->
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Device storage", style = MaterialTheme.typography.titleMedium)
+                Text("${Formatter.formatShortFileSize(context, free)} free of ${Formatter.formatShortFileSize(context, total)}")
+                if (total > 0) LinearProgressIndicator(progress = { (1f - free.toFloat() / total).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
 @Composable
 internal fun StudioPageTitle(title: String, description: String? = null) {
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -52,10 +88,10 @@ internal fun StudioPageTitle(title: String, description: String? = null) {
 internal fun StudioOverview(
     project: StudioProject?, source: SourcePart?, highlightCount: Int, best: Pair<SourcePart, Highlight>?,
     editEnabled: Boolean, onImport: () -> Unit, onEdit: () -> Unit, onHighlights: () -> Unit,
-    onProjects: () -> Unit, onHighlight: (SourcePart, Highlight) -> Unit
+    onProjects: () -> Unit, onHighlight: (SourcePart, Highlight) -> Unit, onRecipe: (StudioRecipe) -> Unit
 ) {
     StudioPageTitle("Workspace")
-    CreatorSkills(project, source)
+
     val context = LocalContext.current
     val artwork by produceState<ImageBitmap?>(null, source?.uri) {
         value = null
@@ -77,7 +113,7 @@ internal fun StudioOverview(
     }
     val shape = RoundedCornerShape(24.dp)
     Box(Modifier.fillMaxWidth().heightIn(min = 220.dp).clip(shape)
-        .background(Brush.linearGradient(listOf(Color(0xFF20324B), Color(0xFF101821))))) {
+        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.surface)))) {
         artwork?.let {
             Image(it, contentDescription = null, modifier = Modifier.matchParentSize(), contentScale = ContentScale.Crop)
             Box(Modifier.matchParentSize().background(Brush.verticalGradient(listOf(
@@ -86,6 +122,8 @@ internal fun StudioOverview(
         }
         Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            source?.let { Text("${project?.layout?.label.orEmpty()} · ${timestamp(it.durationMs)}",
+                color = Color.White, style = MaterialTheme.typography.labelLarge) }
             if (project == null) {
                 Icon(painterResource(R.drawable.nav_import), null, Modifier.size(25.dp), tint = MaterialTheme.colorScheme.primary)
                 Text("Start a project", style = MaterialTheme.typography.headlineSmall, color = Color.White)
@@ -103,20 +141,40 @@ internal fun StudioOverview(
                 project != null -> "Open import"
                 else -> "Import recording"
             }
-            Button(onClick = if (source != null) onEdit else onImport, enabled = source == null || editEnabled) { Text(action) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = if (source != null) onEdit else onImport, enabled = source == null || editEnabled) { Text(action) }
+                if (source != null) TextButton(onClick = onImport) { Text("Import part", color = Color.White) }
+            }
         }
     }
-    if (project != null) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            DashboardCounter(Modifier.weight(1f), "Highlights", highlightCount, R.drawable.nav_highlights, onHighlights)
-            DashboardCounter(Modifier.weight(1f), "Exports", project.exports.size, R.drawable.nav_projects, onProjects)
-        }
-        if (best != null) {
-            Text("Top highlight", style = MaterialTheme.typography.titleLarge)
-            StudioHighlightCard(best.first, best.second, editEnabled) { onHighlight(best.first, best.second) }
-        }
-        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("Import another recording") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DashboardCounter(Modifier.weight(1f), "Highlights", highlightCount, R.drawable.nav_highlights, onHighlights)
+        DashboardCounter(Modifier.weight(1f), "Exports", project?.exports?.size ?: 0, R.drawable.nav_projects, onProjects)
+        DashboardCounter(Modifier.weight(1f), "Parts", project?.availableParts?.count { !it.part.joined } ?: 0,
+            R.drawable.nav_import, onImport)
     }
+    Text("One-tap recipes", style = MaterialTheme.typography.titleLarge)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        StudioRecipe.entries.forEach { recipe ->
+            Card(onClick = { onRecipe(recipe) }, enabled = source != null && editEnabled, modifier = Modifier.width(172.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(painterResource(R.drawable.nav_editor), null, tint = MaterialTheme.colorScheme.secondary)
+                    Text(recipe.title, style = MaterialTheme.typography.titleMedium)
+                    Text(recipe.detail, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+    if (best != null) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Top highlight", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            TextButton(onClick = onHighlights) { Text("View all") }
+        }
+        StudioHighlightCard(best.first, best.second, editEnabled) { onHighlight(best.first, best.second) }
+    }
+
 }
 
 @Composable
@@ -138,7 +196,11 @@ internal fun StudioHighlightCard(part: SourcePart, highlight: Highlight, enabled
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(highlight.reason, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Text("${highlight.score}/100", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(progress = { (highlight.score / 100f).coerceIn(0f,1f) },
+                        modifier = Modifier.size(42.dp), strokeWidth = 3.dp)
+                    Text(highlight.score.toString(), style = MaterialTheme.typography.labelLarge)
+                }
             }
             highlight.speechExcerpt?.let { Text("“$it”", style = MaterialTheme.typography.bodyMedium, maxLines = 3,
                 overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant) }

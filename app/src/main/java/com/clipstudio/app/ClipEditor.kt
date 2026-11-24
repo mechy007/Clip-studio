@@ -85,14 +85,14 @@ private enum class EditorTool(val label: String) {
 @Composable
 internal fun ClipEditor(
     part: SourcePart, project: StudioProject, state: StudioState, draftId: String, suggestedStart: Long, suggestedEnd: Long,
-    momentSelection: Int, exportRequest: Int, notify: () -> Unit, onBookmarkDraft: (Long) -> Unit
+    momentSelection: Int, exportRequest: Int, recipe: StudioRecipe?, notify: () -> Unit, onBookmarkDraft: (Long) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val suggested = suggestedStart in 0 until suggestedEnd && suggestedEnd <= part.durationMs
     val savedDraft = remember { project.drafts[draftId] }
     val savedEdit = savedDraft?.edit
-    var layout by rememberSaveable { mutableStateOf(savedEdit?.layout ?: project.framing?.layout ?: project.layout) }
+    var layout by rememberSaveable { mutableStateOf(savedEdit?.layout ?: recipe?.layout ?: project.framing?.layout ?: project.layout) }
     fun selectLayout(value: Layout) {
         layout = value
         StudioSession.changeLayout(value)
@@ -115,7 +115,7 @@ internal fun ClipEditor(
     var originalSize by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var sourceSize by remember { mutableStateOf(0 to 0) }
     var trackingOn by rememberSaveable { mutableStateOf(savedEdit?.facePath?.isNotEmpty() == true) }
-    var normalize by rememberSaveable { mutableStateOf(savedEdit?.audio?.normalize ?: false) }
+    var normalize by rememberSaveable { mutableStateOf(savedEdit?.audio?.normalize ?: (recipe == StudioRecipe.Reaction)) }
     var fades by rememberSaveable { mutableStateOf(savedEdit?.audio?.fade ?: false) }
     var mix by rememberSaveable { mutableStateOf(savedEdit?.audio?.mixTracks ?: false) }
     var voiceLevel by rememberSaveable { mutableStateOf(savedEdit?.audio?.voice ?: 1f) }
@@ -130,7 +130,7 @@ internal fun ClipEditor(
     var preciseTrim by rememberSaveable { mutableStateOf(false) }
     var captionAppearance by rememberSaveable { mutableStateOf(false) }
     var exportOptions by rememberSaveable { mutableStateOf(false) }
-    var preset by rememberSaveable { mutableStateOf(savedEdit?.preset ?: CaptionPreset.KARAOKE) }
+    var preset by rememberSaveable { mutableStateOf(savedEdit?.preset ?: recipe?.captions ?: CaptionPreset.KARAOKE) }
     var captionPosition by rememberSaveable { mutableStateOf(savedEdit?.captionPosition ?: CaptionPosition.LOWER) }
     var captionSize by rememberSaveable { mutableStateOf(savedEdit?.captionSize ?: 100) }
     var customCaptions by rememberSaveable { mutableStateOf(savedDraft?.customCaptions ?: false) }
@@ -278,17 +278,12 @@ internal fun ClipEditor(
         }
     }
     val activeTool = if (tool == EditorTool.Crop) EditorTool.Layout else tool
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf(EditorTool.Trim, EditorTool.Layout, EditorTool.Captions, EditorTool.Audio).forEach { item ->
-            FilterChip(selected = activeTool == item, onClick = { tool = item }, label = { Text(item.label) })
-        }
-    }
     Column(
         Modifier.fillMaxWidth().bringIntoViewRequester(previewAnchor).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface)
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
+        Text("${layout.label} · ${width}p · ${timestamp(end - start)}", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 enabled = end > start, onClick = {
@@ -378,6 +373,12 @@ internal fun ClipEditor(
             if (activeTool == EditorTool.Layout && layout in listOf(Layout.Split, Layout.Fill, Layout.Square)) {
                 Text("Drag to reposition · pinch to zoom", style = MaterialTheme.typography.bodySmall)
             }
+        }
+    }
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(EditorTool.Layout, EditorTool.Captions, EditorTool.Audio, EditorTool.Trim, EditorTool.Export).forEach { item ->
+            FilterChip(selected = activeTool == item, onClick = { tool = item }, label = { Text(item.label) })
         }
     }
     val canCaption = canRenderEdit && !generatingCaptions && end - start <= StudioAnalysis.MAX_CAPTION_DURATION_MS

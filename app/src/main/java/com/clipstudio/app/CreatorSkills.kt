@@ -23,9 +23,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 @Composable
-internal fun CreatorSkills(project: StudioProject?, source: SourcePart?) {
+internal fun CreatorSkills(project: StudioProject?, source: SourcePart?, compact: Boolean = false) {
     var opened by remember { mutableStateOf(false) }
-    OutlinedButton(onClick = { opened = true }, modifier = Modifier.fillMaxWidth()) { Text("YouTube skills") }
+    OutlinedButton(onClick = { opened = true }, modifier = if (compact) Modifier else Modifier.fillMaxWidth()) { Text(if (compact) "AI Hub" else "YouTube skills") }
     if (opened) Dialog(onDismissRequest = { opened = false }) {
         Surface(shape = MaterialTheme.shapes.large) { CreatorWorkspace(project, source) { opened = false } }
     }
