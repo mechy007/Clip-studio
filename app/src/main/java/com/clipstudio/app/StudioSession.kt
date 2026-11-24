@@ -349,12 +349,14 @@ internal object StudioSession {
         work(context, Work.ANALYZE, "Finding highlights") { app ->
             while (true) {
                 val current = state.value.project ?: break
-                val pending = current.availableParts.firstOrNull { it.highlights == null } ?: break
-                describe(Work.ANALYZE, "Finding highlights · section ${current.parts.indexOf(pending) + 1}")
-                val highlights = StudioAnalysis.highlights(app, pending.part, current.mode)
+                val pending = current.availableParts.firstOrNull { !it.part.joined && !it.speechAnalyzed } ?: break
+                val section = current.parts.indexOf(pending) + 1
+                val highlights = StudioAnalysis.highlights(app, pending.part, current.mode) { stage ->
+                    withContext(Dispatchers.Main.immediate) { describe(Work.ANALYZE, "$stage · section $section") }
+                }
                 updateProject(current.id) { project ->
                     project.copy(parts = project.parts.map {
-                        if (it.part.uri == pending.part.uri) it.copy(highlights = highlights) else it
+                        if (it.part.uri == pending.part.uri) it.copy(highlights = highlights, speechAnalyzed = true) else it
                     })
                 }
             }
@@ -582,7 +584,7 @@ internal object StudioSession {
     fun setMode(context: Context, mode: HighlightMode) {
         val project = state.value.project ?: return
         if (project.mode == mode || Work.ANALYZE in jobs) return
-        save(project.copy(mode = mode, parts = project.parts.map { it.copy(highlights = if (it.part.joined) emptyList() else null) }))
+        save(project.copy(mode = mode, parts = project.parts.map { it.copy(highlights = if (it.part.joined) emptyList() else null, speechAnalyzed = false) }))
         analyze(context)
     }
 
@@ -674,7 +676,7 @@ internal object StudioSession {
                 // Start the replacement foreground work before publishing an idle state.
                 if (key == Work.EXPORT && resumeAnalysis) {
                     resumeAnalysis = false
-                    if (state.value.project?.availableParts?.any { it.highlights == null } == true) analyze(app)
+                    if (state.value.project?.availableParts?.any { !it.part.joined && !it.speechAnalyzed } == true) analyze(app)
                 }
                 update {
                     if (key == Work.EXPORT) it.copy(jobs = it.jobs - key, exportingClip = null, queueExportActive = false, finishingPart = false)

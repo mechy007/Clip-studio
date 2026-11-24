@@ -20,6 +20,8 @@ Compatible YouTube recordings yield independently playable sections as the sourc
 
 Grant notification permission to see import, analysis, and export progress outside the app. Saved projects, completed sections, highlight suggestions, and finished clip links can be reopened after a restart. Compatible progressive YouTube transfers can resume from a saved section boundary. Queued clips and their selected caption styles are restored with the project. The editor automatically saves editable clip drafts. Use **Clip drafts** to create or reopen multiple drafts per source part. Automatic caption generation supports clips up to two minutes. Use media you have permission to process.
 
+The **Home** dashboard shows your current project, highest-ranked highlight, and shortcuts to editing and exports. **Highlights** uses the bundled Whisper model first to find spoken moments and show transcript excerpts. The speech scan runs on downloaded footage and uses segment timing. Audio and motion cues still suggest clips in quieter recordings. For projects with earlier results, open **Highlights → Refresh with Whisper**.
+
 ## Build
 
 Use JDK 17, Android SDK 35, Android NDK 27.2.12479018, CMake 3.22.1, and Gradle 8.9.

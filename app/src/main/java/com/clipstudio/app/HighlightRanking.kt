@@ -5,7 +5,9 @@ internal enum class HighlightMode(val label: String) {
 }
 
 internal data class VisualSample(val timeMs: Long, val change: Float)
-internal data class Highlight(val startMs: Long, val endMs: Long, val score: Int, val reason: String)
+internal data class Highlight(
+    val startMs: Long, val endMs: Long, val score: Int, val reason: String, val speechExcerpt: String? = null
+)
 
 internal fun rankHighlights(
     durationMs: Long,

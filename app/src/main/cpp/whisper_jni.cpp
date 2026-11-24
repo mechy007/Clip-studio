@@ -64,7 +64,8 @@ Java_com_clipstudio_app_WhisperEngine_transcribe(
         jobject,
         jfloatArray audio_data,
         jint thread_count,
-        jstring language) {
+        jstring language,
+        jboolean word_timing) {
     if (audio_data == nullptr) return nullptr;
 
     std::lock_guard<std::mutex> lock(g_whisper_mutex);
@@ -92,7 +93,7 @@ Java_com_clipstudio_app_WhisperEngine_transcribe(
     params.n_threads = thread_count > 0 ? thread_count : 2;
     params.no_context = true;
     params.single_segment = false;
-    params.token_timestamps = true;
+    params.token_timestamps = word_timing == JNI_TRUE;
 
     const int result = whisper_full(g_whisper_context, params, samples, sample_count);
     env->ReleaseFloatArrayElements(audio_data, samples, JNI_ABORT);
@@ -128,7 +129,7 @@ Java_com_clipstudio_app_WhisperEngine_transcribe(
             word.clear();
             word_start = word_end = -1;
         };
-        for (int token = 0; token < whisper_full_n_tokens(g_whisper_context, i); ++token) {
+        for (int token = 0; word_timing == JNI_TRUE && token < whisper_full_n_tokens(g_whisper_context, i); ++token) {
             const auto data = whisper_full_get_token_data(g_whisper_context, i, token);
             if (data.id >= whisper_token_eot(g_whisper_context)) continue;
             const char *piece = whisper_full_get_token_text(g_whisper_context, i, token);

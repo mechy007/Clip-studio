@@ -151,6 +151,28 @@ class ImportedWorkflowTest {
         assertEquals(null, nextRecordingPart(part.endMs, RECORDING_PART_MS))
     }
 
+    @Test fun spokenMomentsRankAboveLouderVisualFallbackAndSupplyAQuote() {
+        val speech = listOf(
+            TranscriptSegment(20_000, 23_000, "Wait, we finally got it!"),
+            TranscriptSegment(23_500, 27_000, "I did not expect that to work.")
+        )
+        val result = speechFirstHighlights(90_000, speech, emptyList(), emptyList(),
+            listOf(VisualSample(65_000, .90f)), HighlightMode.BALANCED)
+        assertEquals(2, result.size)
+        assertTrue(result.first().speechExcerpt.orEmpty().contains("finally got it"))
+        assertTrue(result.first().startMs <= 20_000 && result.first().endMs >= 27_000)
+        assertTrue(result.first().score > result.last().score)
+        assertEquals("Sudden visual activity", result.last().reason)
+    }
+
+    @Test fun speechScanIgnoresSoundLabelsAndKeepsMotionOnlySuggestions() {
+        val motion = listOf(VisualSample(40_000, .80f))
+        val expected = rankHighlights(80_000, emptyList(), emptyList(), motion)
+        assertEquals(expected, speechFirstHighlights(80_000,
+            listOf(TranscriptSegment(5_000, 12_000, "[Loud background music]")),
+            emptyList(), emptyList(), motion, HighlightMode.BALANCED))
+    }
+
     @Test fun selectsVisualActionWithoutAudioOrSpeech() {
         val moments = rankHighlights(90_000, emptyList(), emptyList(),
             listOf(VisualSample(12_000, .03f), VisualSample(30_000, .52f), VisualSample(60_000, .44f)))
