@@ -654,13 +654,30 @@ internal object StudioMedia {
         val staging = File(directory, "indexed-part.mp4.part")
         staging.delete()
         try {
-            val encoded = encodeRecordingChunk(
-                context, inputs, range.startMs, range.lengthMs, staging, remote = false,
-                videoKbps = videoKbps, encoderThreads = 2
-            ) { time ->
-                val percent = 75 + (time * 25 / range.lengthMs.coerceAtLeast(1L)).toInt().coerceIn(0, 24)
-                progress(GuidedDownloadProgress(percent, null, assembling = true,
-                    bytesFetched = localTracks.sumOf { it.length() }))
+            val inputArgs = inputs.flatMap { stream ->
+                val seekOffset = stream.seekOffsetMs ?: 0L
+                val seek = if (seekOffset == 0L) emptyList() else listOf("-ss", seconds(seekOffset))
+                seek + listOf("-i", stream.url)
+            }
+            val copyArguments = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + listOf(
+                "-t", seconds(range.lengthMs),
+                "-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0",
+                "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
+                staging.absolutePath
+            )
+            val copied = runFfmpeg(copyArguments.toTypedArray()) &&
+                recordingDuration(context, staging, range.lengthMs, requireAudio = true)
+                    ?.let { abs(it - range.lengthMs) <= 350L } == true
+            val encoded = if (copied) true else {
+                staging.delete()
+                encodeRecordingChunk(
+                    context, inputs, 0L, range.lengthMs, staging, remote = false,
+                    videoKbps = videoKbps, encoderThreads = 2
+                ) { time ->
+                    val percent = 75 + (time * 25 / range.lengthMs.coerceAtLeast(1L)).toInt().coerceIn(0, 24)
+                    progress(GuidedDownloadProgress(percent, null, assembling = true,
+                        bytesFetched = localTracks.sumOf { it.length() }))
+                }
             }
             check(encoded && recordingDuration(context, staging, range.lengthMs, requireAudio = true) != null) {
                 "The selected DASH fragments downloaded, but the requested MP4 range could not be assembled."
