@@ -59,41 +59,40 @@ internal object StudioMedia {
         }
     }
 
-    /** Publish only MP4s whose mux has completed. CSV rows are flushed by FFmpeg after closing each file. */
+    /**
+     * Resolve separate video/audio DASH streams where available, then let FFmpeg read both
+     * inputs concurrently and stream-copy completed 40-second MP4 sections.
+     *
+     * The previous path selected one progressive muxed URL. That made the phone depend on
+     * one throttled response and prevented the video/audio transfers from progressing in
+     * parallel. The resolver still falls back to a compatible muxed format when needed.
+     */
     suspend fun downloadInParts(
         context: Context,
         link: String,
         resumeAtMs: Long = 0,
         formatId: String? = null,
+        onTransferProgress: suspend (bytesPerSecond: Long, totalBytes: Long) -> Unit = { _, _ -> },
         onPart: suspend (SourcePart) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
-        val videoId = YouTubeLinkClassifier.parseVideoId(link)
-        val media = runInterruptible {
-            YouTubeVideoImporter.prepare(context)
-            val format = formatId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) }
-                ?: "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
-            val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
-                .addOption("--no-playlist")
-                .addOption("--match-filter", "!is_live & !is_upcoming")
-                .addOption("--socket-timeout", 20)
-                .addOption("-f", format)
-                .addOption("--print", """{"url":%(url)j,"format":%(format_id)j,"duration":%(duration)j}""")
-            YoutubeDL.execute(request).out.lineSequence().map(String::trim).firstOrNull { it.startsWith("{") }
-                ?.let(::JSONObject)
-        } ?: return@withContext false
-        val source = media.getString("url")
-        val selectedFormat = media.getString("format")
-        val expectedEnd = media.optDouble("duration", 0.0).let { if (it.isFinite()) (it * 1000).toLong() else 0L }
-        val remote = runCatching { URI(source) }.getOrNull()
-        if (remote?.scheme != "https" || remote.host == null) return@withContext false
-        if (formatId != null && selectedFormat != formatId) return@withContext false
-        if (expectedEnd > 0 && resumeAtMs >= expectedEnd - 300) return@withContext true
+        val recording = try {
+            resolveRecording(context, link, formatId, height = 1080)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (formatId != null) throw error
+            android.util.Log.w("ClipStudioYouTube", "DASH stream resolution failed; trying the full-video importer", error)
+            return@withContext false
+        }
+        if (recording.inputs.isEmpty() || recording.inputs.size > 2) return@withContext false
+        if (recording.endMs > 0 && resumeAtMs >= recording.endMs - 300L) return@withContext true
 
         val dir = File(context.filesDir, "imports/parts-${UUID.randomUUID()}")
         check(dir.mkdirs()) { "Could not create download storage." }
         val list = File(dir, "segments.csv")
         val published = mutableSetOf<String>()
         var latestEnd = resumeAtMs
+
         suspend fun publishReady(includeTail: Boolean = false) {
             val csv = if (list.isFile) list.readText() else ""
             val rows = csv.substringBeforeLast('\n', "").lineSequence().mapNotNull(::parseSegmentRow).toList()
@@ -102,11 +101,11 @@ internal object StudioMedia {
                 if (tail && !includeTail && entry.endMs - entry.startMs < 40_000L) break
                 val file = File(dir, entry.name)
                 if (!YouTubeDownloadValidation.isValidMp4(file)) break
-                val uri = Uri.fromFile(file)
-                if (entry.startMs + resumeAtMs < latestEnd - 750) break
+                if (entry.startMs + resumeAtMs < latestEnd - 750L) break
                 val offset = entry.startMs + resumeAtMs
                 val end = entry.endMs + resumeAtMs
-                val part = SourcePart(uri, offset, duration(context, uri), end, selectedFormat)
+                val part = SourcePart(Uri.fromFile(file), offset, duration(context, Uri.fromFile(file)),
+                    end, recording.format)
                 currentCoroutineContext().ensureActive()
                 withContext(NonCancellable) {
                     onPart(part)
@@ -115,32 +114,62 @@ internal object StudioMedia {
                 }
             }
         }
+
         try {
             val complete = coroutineScope {
                 val transfer = async {
                     val seek = if (resumeAtMs == 0L) emptyList() else listOf("-ss", seconds(resumeAtMs))
-                    // Stream-copy the initial import. A restarted import needs an accurate seek
-                    // that decodes and discards preceding GOP frames before producing new parts.
+                    val inputArgs = recording.inputs.flatMapIndexed { index, stream ->
+                        val headers = if (stream.headers.isEmpty()) emptyList()
+                            else listOf("-headers", stream.headers)
+                        listOf(
+                            "-thread_queue_size", "1024",
+                            "-rw_timeout", "30000000",
+                            "-reconnect", "1",
+                            "-reconnect_streamed", "1",
+                            "-reconnect_delay_max", "5"
+                        ) + headers + seek + listOf("-i", stream.url)
+                    }
+                    val mapping = if (recording.inputs.size == 2) {
+                        listOf("-map", "0:v:0", "-map", "1:a:0")
+                    } else {
+                        listOf("-map", "0:v:0", "-map", "0:a:0")
+                    }
+                    // Initial imports are lossless stream copies. A resumed import seeks to
+                    // the saved boundary and re-encodes only the resumed portion for accuracy.
                     val codec = if (resumeAtMs == 0L) listOf("-c", "copy") else listOf(
                         "-threads", "2", "-c:v", "libopenh264", "-b:v", "4500k",
                         "-force_key_frames", "expr:gte(t,n_forced*40)", "-c:a", "aac", "-b:a", "128k"
                     )
-                    val arguments = listOf("-nostdin", "-loglevel", "error", "-rw_timeout", "20000000") + seek +
-                        listOf("-i", source, "-map", "0:v:0", "-map", "0:a:0") + codec + listOf(
-                        "-avoid_negative_ts", "disabled", "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
-                        "-segment_format_options", "movflags=+faststart",
-                        "-segment_list", list.absolutePath, "-segment_list_type", "csv",
-                        File(dir, "part-%05d.mp4").absolutePath
-                    )
+                    val arguments = listOf("-nostdin", "-loglevel", "error") +
+                        inputArgs + listOf("-max_muxing_queue_size", "2048") + mapping + codec + listOf(
+                            "-avoid_negative_ts", "disabled",
+                            "-f", "segment", "-segment_time", "40", "-reset_timestamps", "1",
+                            "-segment_format_options", "movflags=+faststart",
+                            "-segment_list", list.absolutePath, "-segment_list_type", "csv",
+                            File(dir, "part-%05d.mp4").absolutePath
+                        )
                     runFfmpeg(arguments.toTypedArray())
                 }
+                var lastSampleAt = SystemClock.elapsedRealtime()
+                var lastSampleBytes = 0L
                 while (!transfer.isCompleted) {
                     publishReady()
-                    delay(400)
+                    delay(1_000)
+                    val currentBytes = dir.listFiles().orEmpty().asSequence()
+                        .filter { it.isFile && it.name.endsWith(".mp4") }
+                        .sumOf { it.length() }
+                    val now = SystemClock.elapsedRealtime()
+                    val elapsed = (now - lastSampleAt).coerceAtLeast(1L)
+                    val speed = ((currentBytes - lastSampleBytes).coerceAtLeast(0L) * 1_000L) / elapsed
+                    onTransferProgress(speed, currentBytes)
+                    lastSampleAt = now
+                    lastSampleBytes = currentBytes
                 }
                 val success = transfer.await()
                 val last = if (list.isFile) list.readLines().lastOrNull()?.let(::parseSegmentRow) else null
-                val finished = success && (expectedEnd == 0L || last != null && resumeAtMs + last.endMs >= expectedEnd - 1800)
+                val finished = success && (recording.endMs == 0L ||
+                    last != null && resumeAtMs + last.endMs >= recording.endMs - 1_800L)
                 publishReady(includeTail = finished)
                 finished && last != null && latestEnd >= resumeAtMs + last.endMs
             }

@@ -290,7 +290,17 @@ internal object StudioSession {
         val last = state.value.project?.latestSourcePart
         val offset = last?.nextOffsetMs ?: 0L
         val segmented = try {
-            StudioMedia.downloadInParts(app, link, offset, last?.formatId) { part ->
+            StudioMedia.downloadInParts(
+                app, link, offset, last?.formatId,
+                onTransferProgress = { bytesPerSecond, totalBytes ->
+                    withContext(Dispatchers.Main.immediate) {
+                        val rate = android.text.format.Formatter.formatShortFileSize(app, bytesPerSecond) + "/s"
+                        val fetched = android.text.format.Formatter.formatShortFileSize(app, totalBytes)
+                        val ready = state.value.project?.parts?.count { !it.part.joined } ?: 0
+                        describe(Work.IMPORT, "Downloading · $rate · $fetched received · $ready sections ready")
+                    }
+                }
+            ) { part ->
                 withContext(Dispatchers.Main.immediate) {
                     addPart(app, part)
                     describe(Work.IMPORT, "Downloading · ${state.value.project?.parts?.count { !it.part.joined } ?: 0} sections ready")
@@ -305,7 +315,17 @@ internal object StudioSession {
         if (!segmented) {
             check(offset == 0L) { "Could not resume this format. Completed sections are still available." }
             describe(Work.IMPORT, "Preparing full-video import")
-            val uri = YouTubeVideoImporter.download(app, link, 1080) { percent ->
+            val uri = YouTubeVideoImporter.download(
+                app, link, 1080,
+                onSpeed = { bytesPerSecond ->
+                    scope.launch {
+                        if (jobs[Work.IMPORT]?.isActive == true) {
+                            val rate = android.text.format.Formatter.formatShortFileSize(app, bytesPerSecond) + "/s"
+                            describe(Work.IMPORT, "Downloading full video · $rate")
+                        }
+                    }
+                }
+            ) { percent ->
                 scope.launch {
                     if (jobs[Work.IMPORT]?.isActive == true) describe(Work.IMPORT, "Downloading full video · $percent%")
                 }
