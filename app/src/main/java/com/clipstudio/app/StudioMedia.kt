@@ -192,14 +192,18 @@ internal object StudioMedia {
     }
 
     private data class MediaStream(val url: String, val headers: String)
-    private data class RecordingStreams(val endMs: Long, val format: String, val inputs: List<MediaStream>)
+    private data class RecordingStreams(
+        val endMs: Long, val format: String, val inputs: List<MediaStream>,
+        val dashTracks: List<IndexedDashTrack> = emptyList()
+    )
 
     private fun JSONObject.requestHeaders(): Map<String, String> = optJSONObject("http_headers")?.let { headers ->
         headers.keys().asSequence().associateWith { headers.optString(it) }
     }.orEmpty()
 
     private suspend fun resolveRecording(
-        context: Context, link: String, previousFormat: String?, audioOnly: Boolean = false, height: Int = 1080
+        context: Context, link: String, previousFormat: String?, audioOnly: Boolean = false, height: Int = 1080,
+        indexedDash: Boolean = false
     ): RecordingStreams {
         val id = YouTubeLinkClassifier.parseVideoId(link)
         val media = runInterruptible {
@@ -214,6 +218,7 @@ internal object StudioMedia {
                 .addOption("--socket-timeout", 20)
                 .addOption("--dump-single-json")
                 .addOption("-f", format)
+            if (indexedDash) request.addOption("--extractor-args", "youtube:formats=dashy")
             JSONObject(YoutubeDL.execute(request).out.trim())
         }
         when (media.optString("live_status")) {
@@ -239,7 +244,8 @@ internal object StudioMedia {
         }
         check(audioOnly || available.size == inputs.size) { "No compatible video and audio streams were available for this recording." }
 
-        return RecordingStreams(durationMs, selectedFormat, available)
+        val dashTracks = if (indexedDash) IndexedDashPlanner.parseSelectedFormats(media).orEmpty() else emptyList()
+        return RecordingStreams(durationMs, selectedFormat, available, dashTracks)
     }
 
     suspend fun scanRecording(
@@ -349,19 +355,21 @@ internal object StudioMedia {
     }
 
     private suspend fun resolveGuidedRecording(
-        context: Context, link: String, preferredFormat: String?, quality: DownloadQuality?
+        context: Context, link: String, preferredFormat: String?, quality: DownloadQuality?, indexedDash: Boolean = true
     ): RecordingStreams {
         val height = quality?.maxHeight ?: 1080
         if (preferredFormat != null) {
             try {
-                withTimeoutOrNull(35_000) { resolveRecording(context, link, preferredFormat, height = height) }?.let { return it }
+                withTimeoutOrNull(35_000) {
+                    resolveRecording(context, link, preferredFormat, height = height, indexedDash = indexedDash)
+                }?.let { return it }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 // Formats can change between scans. Normalized chunks can still be reused.
             }
         }
-        return withTimeoutOrNull(60_000) { resolveRecording(context, link, null, height = height) }
+        return withTimeoutOrNull(60_000) { resolveRecording(context, link, null, height = height, indexedDash = indexedDash) }
             ?: error("Could not open the video range. Retry this part when your connection is stable.")
     }
 
@@ -394,7 +402,25 @@ internal object StudioMedia {
         }
         files.save(plan)
         val publishedDuration = recordingDuration(context, files.output, range.lengthMs, requireAudio = true)
+        var indexedReady = publishedDuration != null
         if (publishedDuration == null) {
+            val indexedStreams = recording ?: runCatching {
+                resolveGuidedRecording(context, link, plan.format, quality, indexedDash = true)
+            }.getOrNull()
+            if (indexedStreams?.dashTracks?.isNotEmpty() == true) {
+                recording = indexedStreams
+                indexedReady = try {
+                    downloadIndexedRange(context, directory, indexedStreams.dashTracks, range, quality, fast, progress)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    android.util.Log.w("ClipStudioYouTube", "Indexed DASH range failed; retrying with the range-only FFmpeg downloader", error)
+                    recording = null
+                    false
+                }
+            }
+        }
+        if (publishedDuration == null && !indexedReady) {
             files.output.delete()
             var tracks: RecordingTracks? = null
             val completed = chunks.mapIndexed { index, chunk ->
@@ -430,7 +456,7 @@ internal object StudioMedia {
                 checkDownloadSpace(directory, peakStagingBytes)
 
                 val streams = recording
-                    ?: resolveGuidedRecording(context, link, plan.format, quality).also { recording = it }
+                    ?: resolveGuidedRecording(context, link, plan.format, quality, indexedDash = false).also { recording = it }
                 if (streams.format != plan.format) {
                     plan = plan.copy(format = streams.format)
                     files.save(plan)
@@ -572,6 +598,61 @@ internal object StudioMedia {
         withContext(NonCancellable) {
             publish(SourcePart(url, range.startMs, actualDuration, range.endMs, recording?.format ?: plan.format, downloadQuality = quality), range.endMs == plan.recordingEndMs)
             chunks.indices.forEach { files.chunk(it).delete() }
+            File(directory, "indexed").deleteRecursively()
+        }
+    }
+
+    private suspend fun downloadIndexedRange(
+        context: Context, directory: File, tracks: List<IndexedDashTrack>, range: RecordingPartWindow,
+        quality: DownloadQuality?, fast: Boolean, progress: (GuidedDownloadProgress) -> Unit
+    ): Boolean {
+        val indexedDirectory = File(directory, "indexed")
+        val started = SystemClock.elapsedRealtime()
+        var lastSampleAt = started
+        var lastSampleBytes = 0L
+        val videoKbps = quality?.videoKbps ?: 4_500
+        checkDownloadSpace(directory, downloadStagingBytes(range.lengthMs, videoKbps) * 2L)
+        progress(GuidedDownloadProgress(0, null, bytesFetched = 0L))
+        val localTracks = IndexedDashDownloader.download(
+            tracks = tracks,
+            startMs = range.startMs,
+            endMs = range.endMs,
+            directory = indexedDirectory,
+            parallelism = if (fast) 6 else 4,
+            onBytesFetched = { bytes ->
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = (now - lastSampleAt).coerceAtLeast(1L)
+                val speed = if (bytes > lastSampleBytes) ((bytes - lastSampleBytes) * 1_000L) / elapsed else 0L
+                lastSampleAt = now
+                lastSampleBytes = bytes
+                progress(GuidedDownloadProgress(0, null, bytesFetched = bytes, bytesPerSecond = speed.takeIf { it > 0L }))
+            }
+        )
+        check(localTracks.isNotEmpty()) { "No selected DASH media fragments were downloaded." }
+        progress(GuidedDownloadProgress(75, null, assembling = true,
+            bytesFetched = localTracks.sumOf { it.length() }))
+        val inputs = localTracks.map { MediaStream(it.absolutePath, "") }
+        val staging = File(directory, "indexed-part.mp4.part")
+        staging.delete()
+        try {
+            val encoded = encodeRecordingChunk(
+                context, inputs, range.startMs, range.lengthMs, staging, remote = false,
+                videoKbps = videoKbps, encoderThreads = 2
+            ) { time ->
+                val percent = 75 + (time * 25 / range.lengthMs.coerceAtLeast(1L)).toInt().coerceIn(0, 24)
+                progress(GuidedDownloadProgress(percent, null, assembling = true,
+                    bytesFetched = localTracks.sumOf { it.length() }))
+            }
+            check(encoded && recordingDuration(context, staging, range.lengthMs, requireAudio = true) != null) {
+                "The selected DASH fragments downloaded, but the requested MP4 range could not be assembled."
+            }
+            val output = File(directory, "part.mp4")
+            output.delete()
+            check(staging.renameTo(output)) { "Could not save the assembled DASH range." }
+            progress(GuidedDownloadProgress(100, null, bytesFetched = localTracks.sumOf { it.length() }))
+            return true
+        } finally {
+            staging.delete()
         }
     }
 
