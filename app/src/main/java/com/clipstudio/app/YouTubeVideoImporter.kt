@@ -32,7 +32,7 @@ object YouTubeVideoImporter {
 
     internal suspend fun downloadSection(
         context: Context, link: String, format: String, range: RecordingPartWindow, directory: File,
-        copyTracks: Boolean = false, progress: (Long) -> Unit
+        progress: (Long) -> Unit
     ): File {
         val processId = UUID.randomUUID().toString()
         try {
@@ -50,13 +50,7 @@ object YouTubeVideoImporter {
                     .addOption("--download-sections", bounds)
                     .addOption("--merge-output-format", "mp4")
                     .addOption("-o", target.absolutePath)
-                if (copyTracks) {
-                    request.addOption("--no-force-keyframes-at-cuts")
-                        .addOption("--downloader-args", "ffmpeg_i:-rw_timeout 15000000")
-                        .addOption("--downloader-args", "ffmpeg_o:-avoid_negative_ts disabled -use_editlist 1")
-                } else {
-                    request.addOption("--force-keyframes-at-cuts")
-                }
+                request.addOption("--force-keyframes-at-cuts")
                 YoutubeDL.execute(request, processId, false) { percent, _, _ ->
                     if (percent >= 0) progress((range.lengthMs * percent.toDouble().coerceIn(0.0, 95.0) / 100).toLong())
                 }
@@ -68,48 +62,54 @@ object YouTubeVideoImporter {
         }
     }
 
-    suspend fun download(context: Context, url: String, height: Int, onProgress: (Int) -> Unit): Uri =
-        runInterruptible(Dispatchers.IO) {
-            require(YouTubeLinkClassifier.isYouTubeUrl(url))
-            val videoId = YouTubeLinkClassifier.parseVideoId(url)
-            require(height in setOf(720, 1080, 2160))
-            val imports = File(context.filesDir, "imports")
-            val id = UUID.randomUUID().toString()
-            val staging = File(imports, ".$id")
-            check(staging.mkdirs()) { "Could not create the download directory." }
-            try {
-                prepare(context)
-                val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
-                    .addOption("--no-playlist")
-                    .addOption("--match-filter", "!is_live & !is_upcoming")
-                    .addOption("--socket-timeout", 30)
-                    .addOption("--retries", 3)
-                    .addOption("--fragment-retries", 3)
-                    .addOption("-f", "bv*[height<=$height]+ba/b[height<=$height]/best")
-                    .addOption("--merge-output-format", "mp4")
-                    .addOption("-o", File(staging, "video.%(ext)s").absolutePath)
+    suspend fun download(context: Context, url: String, height: Int, onProgress: (Int) -> Unit): Uri {
+        val processId = UUID.randomUUID().toString()
+        return try {
+            runInterruptible(Dispatchers.IO) {
+                require(YouTubeLinkClassifier.isYouTubeUrl(url))
+                val videoId = YouTubeLinkClassifier.parseVideoId(url)
+                require(height in setOf(720, 1080, 2160))
+                val imports = File(context.filesDir, "imports")
+                val staging = File(imports, ".$processId")
+                check(staging.mkdirs()) { "Could not create the download directory." }
                 try {
-                    YoutubeDL.execute(request, id, false) { progress, _, _ ->
-                        if (progress >= 0) onProgress(progress.toInt().coerceIn(0, 99))
+                    prepare(context)
+                    val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+                        .addOption("--no-playlist")
+                        .addOption("--match-filter", "!is_live & !is_upcoming")
+                        .addOption("--socket-timeout", 30)
+                        .addOption("--retries", 3)
+                        .addOption("--fragment-retries", 3)
+                        .addOption("-f", "bv*[height<=$height]+ba/b[height<=$height]/best")
+                        .addOption("--merge-output-format", "mp4")
+                        .addOption("-o", File(staging, "video.%(ext)s").absolutePath)
+                    try {
+                        YoutubeDL.execute(request, processId, false) { progress, _, _ ->
+                            if (progress >= 0) onProgress(progress.toInt().coerceIn(0, 99))
+                        }
+                    } catch (error: YoutubeDLException) {
+                        val detail = error.message.orEmpty()
+                        if (YouTubeDownloadValidation.isForbidden(detail)) {
+                            throw IllegalStateException(
+                                "YouTube refused this download (HTTP 403). Try a different permitted recording, or import a local MP4. The bundled downloader may need updating.", error
+                            )
+                        }
+                        throw error
                     }
-                } catch (error: YoutubeDLException) {
-                    val detail = error.message.orEmpty()
-                    if (YouTubeDownloadValidation.isForbidden(detail)) {
-                        throw IllegalStateException(
-                            "YouTube refused this download (HTTP 403). Try a different permitted recording, or import a local MP4. The bundled downloader may need updating.", error
-                        )
+                    val rendered = File(staging, "video.mp4")
+                    check(YouTubeDownloadValidation.isValidMp4(rendered)) {
+                        "Download did not produce a valid MP4. Try a lower quality or import a local video."
                     }
-                    throw error
+                    val destination = File(imports, "youtube-$videoId-$processId.mp4")
+                    check(rendered.renameTo(destination)) { "Could not save the downloaded video." }
+                    Uri.fromFile(destination).also { onProgress(100) }
+                } finally {
+                    staging.deleteRecursively()
                 }
-                val rendered = File(staging, "video.mp4")
-                check(YouTubeDownloadValidation.isValidMp4(rendered)) {
-                    "Download did not produce a valid MP4. Try a lower quality or import a local video."
-                }
-                val destination = File(imports, "youtube-$videoId-$id.mp4")
-                check(rendered.renameTo(destination)) { "Could not save the downloaded video." }
-                Uri.fromFile(destination).also { onProgress(100) }
-            } finally {
-                staging.deleteRecursively()
             }
+        } catch (cancelled: CancellationException) {
+            runCatching { YoutubeDL.destroyProcessById(processId) }
+            throw cancelled
         }
+    }
 }

@@ -6,6 +6,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImportedWorkflowTest {
+    @Test fun recordingDurationFallsBackToExtractorTextAndFormatMetadata() {
+        assertEquals(3_600_250L, parseRecordingDurationMs(3600.25, null))
+        assertEquals(5_040_125L, parseRecordingDurationMs(null, "1:24:00.125"))
+        assertEquals(5_040_000L, parseRecordingDurationMs(null, null, listOf(5040.0)))
+        assertEquals(null, parseRecordingDurationMs(Double.NaN, "1:60:00"))
+        assertEquals(null, parseRecordingDurationMs(null, "not available"))
+    }
+
+    @Test fun invalidResumePlanMetadataIsRejectedWithoutThrowing() {
+        val valid = validatedGuidedDownloadPlan(600_000, 3_600_000, 1_800_000, "137+140")
+        assertEquals(GuidedDownloadPlan(RecordingPartWindow(600_000, 1_800_000), 3_600_000, "137+140"), valid)
+        assertEquals(null, validatedGuidedDownloadPlan(-1, 3_600_000, 1_800_000, "137"))
+        assertEquals(null, validatedGuidedDownloadPlan(600_000, 3_600_000, 500_000, "137"))
+        assertEquals(null, validatedGuidedDownloadPlan(600_000, 3_600_000, 1_800_000, ""))
+        assertEquals(null, savedRecordingRange(-1, 3_600_000, null, null))
+    }
+
     @Test fun guidedRequestsUseFormatHeadersWithoutLeakingCredentialsOrRanges() {
         val headers = mediaRequestHeaders(
             mapOf("User-Agent" to "Default player", "Cookie" to "private", "Range" to "bytes=0-"),
