@@ -311,7 +311,7 @@ internal object StudioMedia {
         if (!YouTubeDownloadValidation.isValidMp4(source)) {
             check(source.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "Could not create download storage." }
             downloading(0)
-            val downloaded = YouTubeVideoImporter.download(context, link, 1080, downloading)
+            val downloaded = YouTubeVideoImporter.download(context, link, 1080, onProgress = downloading)
             val file = File(requireNotNull(downloaded.path))
             check(file.renameTo(source)) {
                 file.delete()
