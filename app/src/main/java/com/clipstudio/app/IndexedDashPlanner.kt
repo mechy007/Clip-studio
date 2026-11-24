@@ -108,9 +108,14 @@ internal object IndexedDashPlanner {
     fun parseSelectedFormats(media: JSONObject): List<IndexedDashTrack>? {
         val selected = media.optJSONArray("requested_formats")
         val formats = if (selected != null && selected.length() > 0) {
-            List(selected.length()) { selected.optJSONObject(it) ?: return null }
+            val values = ArrayList<JSONObject>(selected.length())
+            for (index in 0 until selected.length()) {
+                values += selected.optJSONObject(index) ?: return null
+            }
+            values
         } else listOf(media)
-        val tracks = formats.map { parse(it) ?: return null }
+        val tracks = ArrayList<IndexedDashTrack>(formats.size)
+        for (format in formats) tracks += parse(format) ?: return null
         return tracks.takeIf { it.isNotEmpty() && it.size <= 2 }
     }
 }
