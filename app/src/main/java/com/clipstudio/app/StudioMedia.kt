@@ -244,7 +244,11 @@ internal object StudioMedia {
         }
         check(audioOnly || available.size == inputs.size) { "No compatible video and audio streams were available for this recording." }
 
-        val dashTracks = if (indexedDash) IndexedDashPlanner.parseSelectedFormats(media).orEmpty() else emptyList()
+        val dashTracks = if (indexedDash) {
+            IndexedDashPlanner.parseSelectedFormats(media).orEmpty().map { track ->
+                track.copy(headers = media.requestHeaders() + track.headers)
+            }
+        } else emptyList()
         return RecordingStreams(durationMs, selectedFormat, available, dashTracks)
     }
 
@@ -404,9 +408,13 @@ internal object StudioMedia {
         val publishedDuration = recordingDuration(context, files.output, range.lengthMs, requireAudio = true)
         var indexedReady = publishedDuration != null
         if (publishedDuration == null) {
-            val indexedStreams = recording ?: runCatching {
+            val indexedStreams = recording ?: try {
                 resolveGuidedRecording(context, link, plan.format, quality, indexedDash = true)
-            }.getOrNull()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
             if (indexedStreams?.dashTracks?.isNotEmpty() == true) {
                 recording = indexedStreams
                 indexedReady = try {
