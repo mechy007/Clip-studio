@@ -70,6 +70,32 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
             finally { busy = false }
         }
     }
+    var image by remember(skill) { mutableStateOf<JSONObject?>(null) }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            busy = true
+            try {
+                image = withContext(Dispatchers.IO) {
+                    val mime = context.contentResolver.getType(uri)
+                    require(mime in listOf("image/jpeg", "image/png", "image/webp")) { "Choose a JPEG, PNG or WebP image." }
+                    val bytes = context.contentResolver.openInputStream(uri)!!.use { stream ->
+                        val buffer = java.io.ByteArrayOutputStream()
+                        val chunk = ByteArray(16384)
+                        while (true) {
+                            val n = stream.read(chunk)
+                            if (n < 0) break
+                            require(buffer.size() + n <= 4 * 1024 * 1024) { "Choose an image under 4 MB." }
+                            buffer.write(chunk, 0, n)
+                        }
+                        buffer.toByteArray()
+                    }
+                    JSONObject().put("type", "base64").put("media_type", mime)
+                        .put("data", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+                }
+            } catch (e: Exception) { output = e.localizedMessage.orEmpty() }
+            finally { busy = false }
+        }
+    }
     val hint = when (skill) {
         "script" -> "Video idea, or one hook for the local scorer"
         "package" -> "Title or video brief"
@@ -91,8 +117,9 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
                     CreatorAgent.analyze(context, skill, data, extra, duration)
                 } else {
                     val (next, answer) = withContext(Dispatchers.IO) {
-                        CreatorAgent.run(context, skill, voice, key.trim(), model.trim(), history, data, extra, duration, research)
+                        CreatorAgent.run(context, skill, voice, key.trim(), model.trim(), history, data, extra, duration, research, image)
                     }
+                    image = null
                     history = next
                     output = answer
                 }
@@ -141,6 +168,11 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
         }) { Text("Use saved clip transcript") }
         OutlinedTextField(extra, { extra = it }, enabled = !busy, maxLines = 4,
             label = { Text(when (skill) { "package" -> "Thumbnail wording"; "retention" -> "Optional transcript"; else -> "Additional context" }) })
+        if (skill in listOf("package", "audit")) {
+            TextButton(enabled = !busy, onClick = {
+                if (image != null) image = null else imagePicker.launch(arrayOf("image/jpeg", "image/png", "image/webp"))
+            }) { Text(if (image == null) "Attach thumbnail for Claude" else "Remove attached thumbnail") }
+        }
         if (skill == "retention") {
             TextButton(enabled = !busy, onClick = { importingExtra = true; picker.launch(arrayOf("*/*")) }) { Text("Import transcript") }
             OutlinedTextField(seconds, { seconds = it }, enabled = !busy, label = { Text("Video duration in seconds") })

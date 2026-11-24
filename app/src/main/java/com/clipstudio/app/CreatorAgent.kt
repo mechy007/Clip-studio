@@ -72,12 +72,14 @@ internal object CreatorAgent {
 
     suspend fun run(context: Context, skill: String, voice: String, key: String, model: String,
                     previous: JSONArray, data: String, extra: String, duration: Double,
-                    research: Boolean): Pair<JSONArray, String> {
+                    research: Boolean, image: JSONObject?): Pair<JSONArray, String> {
         require(skill in creatorSkills)
         val messages = JSONArray(previous.toString())
         val user = JSONObject().put("input", data).put("supplement", extra)
         if (duration > 0) user.put("duration_seconds", duration)
-        messages.put(JSONObject().put("role", "user").put("content", user.toString()))
+        val inputBlocks = JSONArray().put(JSONObject().put("type", "text").put("text", user.toString()))
+        image?.let { inputBlocks.put(JSONObject().put("type", "image").put("source", it)) }
+        messages.put(JSONObject().put("role", "user").put("content", inputBlocks))
         val properties = JSONObject()
         properties.put("tool", JSONObject().put("type", "string").put("enum", JSONArray(localCreatorTools)))
         for (name in listOf("data", "extra")) properties.put(name, JSONObject().put("type", "string"))
