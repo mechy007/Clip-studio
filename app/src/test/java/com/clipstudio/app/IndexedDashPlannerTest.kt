@@ -43,6 +43,21 @@ class IndexedDashPlannerTest {
     }
 
     @Test
+    fun preservesSignedBaseQueryForRelativeFragments() {
+        val signed = JSONObject()
+            .put("format_id", "137")
+            .put("fragment_base_url", "https://cdn.example/video/?token=a%2Fb")
+            .put("fragments", JSONArray()
+                .put(JSONObject().put("url", "init.mp4"))
+                .put(JSONObject().put("url", "seg-1.m4s").put("duration", 10.0)))
+        val track = requireNotNull(IndexedDashPlanner.parse(signed))
+        assertEquals(
+            "https://cdn.example/video/seg-1.m4s?token=a%2Fb",
+            track.fragments[1].url
+        )
+    }
+
+    @Test
     fun resolvesRelativePathsAgainstFragmentBaseUrl() {
         val track = requireNotNull(IndexedDashPlanner.parse(format()))
         assertEquals("https://cdn.example/video/seg-1.m4s", track.fragments[1].url)
