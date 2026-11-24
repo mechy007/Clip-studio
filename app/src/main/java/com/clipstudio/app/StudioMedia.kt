@@ -68,18 +68,24 @@ internal object StudioMedia {
         onPart: suspend (SourcePart) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
         val videoId = YouTubeLinkClassifier.parseVideoId(link)
-        val media = runInterruptible {
-            YouTubeVideoImporter.prepare(context)
-            val format = formatId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) }
-                ?: "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
-            val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
-                .addOption("--no-playlist")
-                .addOption("--match-filter", "!is_live & !is_upcoming")
-                .addOption("--socket-timeout", 20)
-                .addOption("-f", format)
-                .addOption("--print", """{"url":%(url)j,"format":%(format_id)j,"duration":%(duration)j}""")
-            YoutubeDL.execute(request).out.lineSequence().map(String::trim).firstOrNull { it.startsWith("{") }
-                ?.let(::JSONObject)
+        val processId = UUID.randomUUID().toString()
+        val media = try {
+            runInterruptible {
+                YouTubeVideoImporter.prepare(context)
+                val format = formatId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) }
+                    ?: "b[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=1080]"
+                val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+                    .addOption("--no-playlist")
+                    .addOption("--match-filter", "!is_live & !is_upcoming")
+                    .addOption("--socket-timeout", 20)
+                    .addOption("-f", format)
+                    .addOption("--print", """{"url":%(url)j,"format":%(format_id)j,"duration":%(duration)j}""")
+                YoutubeDL.execute(request, processId, false).out.lineSequence().map(String::trim)
+                    .firstOrNull { it.startsWith("{") }?.let(::JSONObject)
+            }
+        } catch (cancelled: CancellationException) {
+            runCatching { YoutubeDL.destroyProcessById(processId) }
+            throw cancelled
         } ?: return@withContext false
         val source = media.getString("url")
         val selectedFormat = media.getString("format")
@@ -168,27 +174,73 @@ internal object StudioMedia {
         context: Context, link: String, previousFormat: String?, audioOnly: Boolean = false, height: Int = 1080
     ): RecordingStreams {
         val id = YouTubeLinkClassifier.parseVideoId(link)
-        val media = runInterruptible {
-            YouTubeVideoImporter.prepare(context)
-            val format = if (audioOnly) "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]" else previousFormat?.also {
-                check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
-            } ?: recordingFormatSelector(height)
-            val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$id")
-                .addOption("--no-playlist")
-                .addOption("--no-warnings")
-                .addOption("--ignore-no-formats-error")
-                .addOption("--socket-timeout", 20)
-                .addOption("--dump-single-json")
-                .addOption("-f", format)
-            JSONObject(YoutubeDL.execute(request).out.trim())
+
+        suspend fun metadata(format: String?): JSONObject {
+            val processId = UUID.randomUUID().toString()
+            return try {
+                runInterruptible {
+                    YouTubeVideoImporter.prepare(context)
+                    val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$id")
+                        .addOption("--no-playlist")
+                        .addOption("--no-warnings")
+                        .addOption("--ignore-no-formats-error")
+                        .addOption("--socket-timeout", 20)
+                        .addOption("--dump-single-json")
+                    if (format != null) request.addOption("-f", format)
+                    JSONObject(YoutubeDL.execute(request, processId, false).out.trim())
+                }
+            } catch (cancelled: CancellationException) {
+                runCatching { YoutubeDL.destroyProcessById(processId) }
+                throw cancelled
+            }
         }
+
+        val format = if (audioOnly) "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]" else previousFormat?.also {
+            check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
+        } ?: recordingFormatSelector(height)
+        val media = metadata(format)
         when (media.optString("live_status")) {
             "is_live", "is_upcoming", "post_live" -> error(
                 "30-minute parts are available when YouTube finishes processing the livestream replay."
             )
         }
-        val durationMs = media.optDouble("duration", 0.0).let { if (it.isFinite()) (it * 1000).toLong() else 0L }
-        check(durationMs > 0) { "YouTube has not provided the recording length yet. Try again when the replay is ready." }
+
+        fun durationFrom(item: JSONObject): Long? {
+            val formatDurations = buildList {
+                listOf("requested_formats", "formats").forEach { key ->
+                    item.optJSONArray(key)?.let { rows ->
+                        for (index in 0 until rows.length()) {
+                            val seconds = rows.optJSONObject(index)?.optDouble("duration", Double.NaN)
+                            add(seconds?.takeIf { it.isFinite() })
+                        }
+                    }
+                }
+            }
+            return parseRecordingDurationMs(
+                item.optDouble("duration", Double.NaN).takeIf { it.isFinite() },
+                item.optString("duration_string").takeIf { it.isNotBlank() },
+                formatDurations
+            )
+        }
+
+        var durationMs = durationFrom(media)
+        if (durationMs == null) {
+            // Some YouTube extractor responses omit duration when a specific format is selected.
+            // Retry metadata-only without a format filter; this never downloads media bytes.
+            val generalMetadata = try {
+                metadata(null)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            durationMs = generalMetadata?.let(::durationFrom)
+                ?: parseRecordingDurationMs(null, media.optString("duration_string"))
+        }
+        check(durationMs != null) {
+            "YouTube did not return a usable recording length. Refresh the extractor and retry when the replay is available."
+        }
+
         val selectedFormat = media.optString("format_id")
         check(audioOnly || selectedFormat.isNotBlank() && (previousFormat == null || selectedFormat == previousFormat)) {
             "The saved YouTube format is unavailable. Completed parts are still available."
@@ -205,7 +257,7 @@ internal object StudioMedia {
         }
         check(audioOnly || available.size == inputs.size) { "No compatible video and audio streams were available for this recording." }
 
-        return RecordingStreams(durationMs, selectedFormat, available)
+        return RecordingStreams(requireNotNull(durationMs), selectedFormat, available)
     }
 
     suspend fun scanRecording(
@@ -334,7 +386,7 @@ internal object StudioMedia {
     /** Commit each short piece locally so a retry does not fetch completed pieces again. */
     suspend fun downloadRecordingPart(
         context: Context, projectId: String, link: String, startMs: Long, previousFormat: String?,
-        fast: Boolean = false, requestedEndMs: Long? = null, quality: DownloadQuality? = null,
+        requestedEndMs: Long? = null, quality: DownloadQuality? = null,
         progress: (GuidedDownloadProgress) -> Unit, publish: suspend (SourcePart, Boolean) -> Unit
     ) = withContext(Dispatchers.IO) {
         val name = quality?.let { "$startMs-${it.label}" } ?: startMs.toString()
