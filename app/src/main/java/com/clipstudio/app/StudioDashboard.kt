@@ -48,10 +48,20 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-internal enum class StudioRecipe(val title: String, val layout: Layout, val captions: CaptionPreset, val detail: String) {
-    Reaction("Streamer reaction", Layout.Split, CaptionPreset.POP, "50/50 facecam · Pop captions · Normalize audio"),
-    Gameplay("Gameplay short", Layout.Fill, CaptionPreset.KARAOKE, "Vertical fill · Karaoke captions"),
-    SquarePost("Square cut", Layout.Square, CaptionPreset.BOXED, "Square frame · Boxed captions")
+internal enum class StudioRecipe(
+    val title: String, val layout: Layout, val captions: CaptionPreset, val detail: String,
+    val normalizeAudio: Boolean = false
+) {
+    Reaction("Viral 50/50 gaming", Layout.Split, CaptionPreset.POP,
+        "Facecam above gameplay · Pop captions · Normalized audio", normalizeAudio = true),
+    Gameplay("Gameplay short", Layout.Fill, CaptionPreset.KARAOKE,
+        "Vertical fill · Animated karaoke captions"),
+    SquarePost("Square cut", Layout.Square, CaptionPreset.BOXED,
+        "Square frame · Boxed captions"),
+    Podcast("Podcast speaker", Layout.Fill, CaptionPreset.BOXED,
+        "9:16 speaker framing · Boxed captions · Voice normalization", normalizeAudio = true),
+    CleanLandscape("Clean 1080p raw", Layout.Landscape, CaptionPreset.CLEAN,
+        "16:9 landscape · Clean captions · Source framing")
 }
 
 @Composable
@@ -88,7 +98,8 @@ internal fun StudioPageTitle(title: String, description: String? = null) {
 internal fun StudioOverview(
     project: StudioProject?, source: SourcePart?, highlightCount: Int, best: Pair<SourcePart, Highlight>?,
     editEnabled: Boolean, onImport: () -> Unit, onEdit: () -> Unit, onHighlights: () -> Unit,
-    onProjects: () -> Unit, onHighlight: (SourcePart, Highlight) -> Unit, onRecipe: (StudioRecipe) -> Unit
+    onProjects: () -> Unit, onWorkspace: () -> Unit,
+    onHighlight: (SourcePart, Highlight) -> Unit, onRecipe: (StudioRecipe) -> Unit
 ) {
     StudioPageTitle("Workspace")
 
@@ -167,6 +178,31 @@ internal fun StudioOverview(
             }
         }
     }
+    Card(
+        onClick = onWorkspace,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+                Icon(painterResource(R.drawable.nav_workspace), null, tint = MaterialTheme.colorScheme.primary)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("AI Hub & creator workspace", style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold)
+                Text("Offline AI, YouTube skills, presets, audio tools and advanced workflows",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("Open", color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+        }
+    }
+
     if (best != null) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Top highlight", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
