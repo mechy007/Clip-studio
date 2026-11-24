@@ -35,7 +35,8 @@ internal object IndexedDashPlanner {
     fun parse(format: JSONObject): IndexedDashTrack? {
         val formatId = format.optString("format_id").takeIf(String::isNotBlank) ?: return null
         val rawFragments = format.optJSONArray("fragments") ?: return null
-        if (rawFragments.length() < 2) return null
+        val initializationUrl = format.optString("initialization_url").takeIf(String::isNotBlank)
+        if (rawFragments.length() < if (initializationUrl != null) 1 else 2) return null
 
         val base = format.optString("fragment_base_url").takeIf(String::isNotBlank)
             ?: format.optString("url").takeIf(String::isNotBlank)
@@ -43,7 +44,6 @@ internal object IndexedDashPlanner {
         val parsed = ArrayList<IndexedDashFragment>(rawFragments.length() + 1)
         var timelineMs = 0L
         var initializationSeen = false
-        val initializationUrl = format.optString("initialization_url").takeIf(String::isNotBlank)
         if (initializationUrl != null) {
             val resolved = resolveUrl(base, initializationUrl) ?: return null
             val uri = runCatching { URI(resolved) }.getOrNull() ?: return null
