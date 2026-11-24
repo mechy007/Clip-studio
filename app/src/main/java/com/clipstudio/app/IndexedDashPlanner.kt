@@ -1,15 +1,11 @@
 package com.clipstudio.app
 
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
 
 /**
  * A timestamp-indexed view of one yt-dlp DASH representation.
- *
- * yt-dlp exposes DASH media as an initialization fragment followed by media fragments.
- * Fragment durations are relative to the beginning of the representation, so selecting
- * by cumulative duration avoids downloading preceding media fragments.
+ * Fragment durations are relative to the beginning of the representation.
  */
 internal data class IndexedDashFragment(
     val index: Int,
@@ -23,7 +19,8 @@ internal data class IndexedDashFragment(
 
 internal data class IndexedDashTrack(
     val formatId: String,
-    val fragments: List<IndexedDashFragment>
+    val fragments: List<IndexedDashFragment>,
+    val headers: Map<String, String>
 ) {
     val initialization: IndexedDashFragment
         get() = fragments.first { it.initialization }
@@ -73,7 +70,10 @@ internal object IndexedDashPlanner {
         }
 
         if (!initializationSeen || parsed.none { !it.initialization }) return null
-        return IndexedDashTrack(formatId, parsed)
+        val headers = format.optJSONObject("http_headers")?.let { json ->
+            json.keys().asSequence().associateWith { json.optString(it) }.filterValues(String::isNotBlank)
+        }.orEmpty()
+        return IndexedDashTrack(formatId, parsed, headers)
     }
 
     fun parseSelectedFormats(media: JSONObject): List<IndexedDashTrack>? {
