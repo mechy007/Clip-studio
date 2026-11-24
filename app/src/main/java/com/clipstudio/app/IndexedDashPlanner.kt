@@ -36,7 +36,8 @@ internal object IndexedDashPlanner {
         val formatId = format.optString("format_id").takeIf(String::isNotBlank) ?: return null
         val rawFragments = format.optJSONArray("fragments") ?: return null
         val initializationUrl = format.optString("initialization_url").takeIf(String::isNotBlank)
-        if (rawFragments.length() < if (initializationUrl != null) 1 else 2) return null
+        val minimumFragmentCount = if (initializationUrl != null) 1 else 2
+        if (rawFragments.length() < minimumFragmentCount) return null
 
         val base = format.optString("fragment_base_url").takeIf(String::isNotBlank)
             ?: format.optString("url").takeIf(String::isNotBlank)
