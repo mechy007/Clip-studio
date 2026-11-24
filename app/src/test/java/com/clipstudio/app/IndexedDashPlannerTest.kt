@@ -36,6 +36,20 @@ class IndexedDashPlannerTest {
     }
 
     @Test
+    fun acceptsInitializationUrlOutsideFragmentArray() {
+        val separated = JSONObject()
+            .put("format_id", "137")
+            .put("fragment_base_url", "https://cdn.example/video/")
+            .put("initialization_url", "init.mp4")
+            .put("fragments", JSONArray()
+                .put(JSONObject().put("url", "seg-1.m4s").put("duration", 10.0))
+                .put(JSONObject().put("url", "seg-2.m4s").put("duration", 10.0)))
+        val track = requireNotNull(IndexedDashPlanner.parse(separated))
+        assertEquals("init.mp4", track.initialization.url.substringAfterLast('/'))
+        assertEquals(2, track.mediaFor(0L, 10_000L).size)
+    }
+
+    @Test
     fun rejectsMissingInitializationOrUnknownDurations() {
         val missingInit = format().put("fragments", JSONArray()
             .put(JSONObject().put("url", "seg-1.m4s").put("duration", 10.0)))
