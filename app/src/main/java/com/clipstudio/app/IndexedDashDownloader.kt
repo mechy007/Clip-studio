@@ -15,6 +15,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.Job
 
 /**
  * Downloads only the DASH initialization data and media fragments that overlap one
@@ -107,6 +108,7 @@ internal object IndexedDashDownloader {
     }
 
     private suspend fun downloadOne(item: WorkItem, onChunkBytes: (Long) -> Unit) {
+        val job = coroutineContext[Job]
         val partial = File(item.destination.absolutePath + ".part")
         partial.delete()
         var lastError: Exception? = null
@@ -127,7 +129,7 @@ internal object IndexedDashDownloader {
                     FileOutputStream(partial).buffered().use { output ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 8)
                         while (true) {
-                            coroutineContext.ensureActive()
+                            job?.ensureActive()
                             val count = input.read(buffer)
                             if (count < 0) break
                             output.write(buffer, 0, count)
