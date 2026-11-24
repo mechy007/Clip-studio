@@ -465,6 +465,7 @@ internal object StudioMedia {
                             semaphore.withPermit {
                                 currentCoroutineContext().ensureActive()
                                 val chunk = chunks[index]
+                                checkDownloadSpace(directory, downloadStagingBytes(chunk.lengthMs, videoKbps) * 2L)
                                 val staging = files.stagingChunk(index)
                                 staging.delete()
                                 try {
@@ -507,7 +508,6 @@ internal object StudioMedia {
                                     }
                                     chunkSpeeds.set(index, 0L)
                                     chunkProgress.set(index, chunk.lengthMs)
-                                    chunkBytes.set(index, files.chunk(index).length())
                                     report(index, chunk.lengthMs)
                                 } finally {
                                     chunkSpeeds.set(index, 0L)
