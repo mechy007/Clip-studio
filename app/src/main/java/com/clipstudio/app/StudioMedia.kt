@@ -634,7 +634,7 @@ internal object StudioMedia {
             startMs = range.startMs,
             endMs = range.endMs,
             directory = indexedDirectory,
-            parallelism = if (fast) 6 else 4,
+            parallelism = indexedDashParallelism(fast),
             onBytesFetched = { bytes ->
                 val now = SystemClock.elapsedRealtime()
                 val elapsed = (now - lastSampleAt).coerceAtLeast(1L)
