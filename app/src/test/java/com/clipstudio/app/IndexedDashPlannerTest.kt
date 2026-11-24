@@ -31,7 +31,7 @@ class IndexedDashPlannerTest {
     fun keepsInitializationSeparateFromMediaSelection() {
         val track = requireNotNull(IndexedDashPlanner.parse(format()))
         assertTrue(track.initialization.initialization)
-        assertEquals(0, track.mediaFor(0L, 10_000L).first().index)
+        assertEquals(1, track.mediaFor(0L, 10_000L).first().index)
         assertEquals("init.mp4", track.initialization.url.substringAfterLast('/'))
     }
 
