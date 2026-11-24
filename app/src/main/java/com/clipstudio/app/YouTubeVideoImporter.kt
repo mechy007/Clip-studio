@@ -32,7 +32,7 @@ object YouTubeVideoImporter {
 
     internal suspend fun downloadSection(
         context: Context, link: String, format: String, range: RecordingPartWindow, directory: File,
-        copyTracks: Boolean = false, progress: (Long) -> Unit
+        progress: (Long) -> Unit
     ): File {
         val processId = UUID.randomUUID().toString()
         try {
@@ -50,13 +50,7 @@ object YouTubeVideoImporter {
                     .addOption("--download-sections", bounds)
                     .addOption("--merge-output-format", "mp4")
                     .addOption("-o", target.absolutePath)
-                if (copyTracks) {
-                    request.addOption("--no-force-keyframes-at-cuts")
-                        .addOption("--downloader-args", "ffmpeg_i:-rw_timeout 15000000")
-                        .addOption("--downloader-args", "ffmpeg_o:-avoid_negative_ts disabled -use_editlist 1")
-                } else {
-                    request.addOption("--force-keyframes-at-cuts")
-                }
+                request.addOption("--force-keyframes-at-cuts")
                 YoutubeDL.execute(request, processId, false) { percent, _, _ ->
                     if (percent >= 0) progress((range.lengthMs * percent.toDouble().coerceIn(0.0, 95.0) / 100).toLong())
                 }
