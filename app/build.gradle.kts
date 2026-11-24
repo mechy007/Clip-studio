@@ -168,8 +168,8 @@ android {
         applicationId = "com.clipstudio.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.5.19"
+        versionCode = 26
+        versionName = "0.5.20"
         ndk.abiFilters += "arm64-v8a"
         externalNativeBuild { cmake { cppFlags += "-std=c++17" } }
     }

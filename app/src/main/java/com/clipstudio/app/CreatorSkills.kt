@@ -9,6 +9,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -33,6 +35,7 @@ internal fun CreatorSkills(project: StudioProject?, source: SourcePart?) {
 private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
     val prefs = remember { context.getSharedPreferences("creator-profile", 0) }
     var skill by remember { mutableStateOf("shorts") }
     var menu by remember { mutableStateOf(false) }
@@ -53,7 +56,7 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
             busy = true
             try {
                 val value = withContext(Dispatchers.IO) {
-                    context.contentResolver.openInputStream(uri)!!.use { stream ->
+                    requireNotNull(context.contentResolver.openInputStream(uri)) { "Could not open the selected file." }.use { stream ->
                         val buffer = ByteArray(512 * 1024 + 1)
                         var size = 0
                         while (size < buffer.size) {
@@ -65,7 +68,8 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
                         String(buffer, 0, size, Charsets.UTF_8)
                     }
                 }
-                if (importingExtra) extra = value else data = value
+                require(value.isNotBlank() && '\u0000' !in value && '\uFFFD' !in value) { "Choose a nonempty UTF-8 text file." }
+                if (importingExtra) extra = value.removePrefix("\uFEFF") else data = value.removePrefix("\uFEFF")
             } catch (e: Exception) { output = e.localizedMessage.orEmpty() }
             finally { busy = false }
         }
@@ -78,7 +82,7 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
                 image = withContext(Dispatchers.IO) {
                     val mime = context.contentResolver.getType(uri)
                     require(mime in listOf("image/jpeg", "image/png", "image/webp")) { "Choose a JPEG, PNG or WebP image." }
-                    val bytes = context.contentResolver.openInputStream(uri)!!.use { stream ->
+                    val bytes = requireNotNull(context.contentResolver.openInputStream(uri)) { "Could not open the selected image." }.use { stream ->
                         val buffer = java.io.ByteArrayOutputStream()
                         val chunk = ByteArray(16384)
                         while (true) {
@@ -114,7 +118,18 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
                 val duration = seconds.takeIf { it.isNotBlank() }?.toDoubleOrNull() ?: 0.0
                 require(seconds.isBlank() || (duration.isFinite() && duration > 0)) { "Enter a positive duration in seconds." }
                 if (local) output = withContext(Dispatchers.IO) {
-                    CreatorAgent.analyze(context, skill, data, extra, duration)
+                    val result = CreatorAgent.analyze(context, skill, data, extra, duration)
+                    if (skill == "chapters") {
+                        val report = JSONObject(result)
+                        val chapters = report.getJSONArray("chapters")
+                        val lines = (0 until chapters.length()).map { i ->
+                            val chapter = chapters.getJSONObject(i)
+                            chapter.getString("label") + " " + chapter.getString("draft_title")
+                        }
+                        if (report.getBoolean("valid")) lines.joinToString("\n")
+                        else "Draft only. This clip needs at least three chapters of ten seconds each.\n\n" +
+                            lines.joinToString("\n")
+                    } else result
                 } else {
                     val (next, answer) = withContext(Dispatchers.IO) {
                         CreatorAgent.run(context, skill, voice, key.trim(), model.trim(), history, data, extra, duration, research, image)
@@ -157,15 +172,35 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
         }
         OutlinedTextField(data, { data = it }, enabled = !busy, label = { Text(hint) }, maxLines = 6)
         TextButton(enabled = !busy, onClick = { importingExtra = false; picker.launch(arrayOf("*/*")) }) { Text("Import text file") }
-        val transcript = project?.drafts?.values?.mapNotNull { it.transcript }
-            ?.filter { it.part.uri == source?.uri }?.maxByOrNull { it.end - it.start }
-        if (transcript != null) TextButton(enabled = !busy, onClick = {
-            val rows = JSONArray()
-            transcript.words.forEach { rows.put(JSONObject().put("start", it.startMs / 1000.0)
-                .put("end", it.endMs / 1000.0).put("text", it.text)) }
-            val json = JSONObject().put("segments", rows).toString()
-            if (skill == "retention") extra = json else data = json
-        }) { Text("Use saved clip transcript") }
+        val transcripts = remember(project?.drafts, source) {
+            project?.drafts?.values.orEmpty().mapNotNull { it.transcript }
+                .filter { it.part.uri == source?.uri && it.words.isNotEmpty() }
+                .distinct().sortedBy { it.start }
+        }
+        var chooseTranscript by remember { mutableStateOf(false) }
+        if (transcripts.isNotEmpty()) Box {
+            TextButton(enabled = !busy, onClick = { chooseTranscript = true }) { Text("Choose saved transcript") }
+            DropdownMenu(expanded = chooseTranscript, onDismissRequest = { chooseTranscript = false }) {
+                transcripts.forEach { memo ->
+                    DropdownMenuItem(text = {
+                        Text("${timestamp(memo.part.offsetMs + memo.start)} – ${timestamp(memo.part.offsetMs + memo.end)} · Track ${memo.audioTrack + 1}")
+                    }, onClick = {
+                        val rows = JSONArray()
+                        memo.words.forEach { segment ->
+                            rows.put(JSONObject().put("start", (segment.startMs - memo.start).coerceAtLeast(0) / 1000.0)
+                                .put("end", (segment.endMs - memo.start).coerceAtLeast(0) / 1000.0)
+                                .put("text", segment.text))
+                        }
+                        val json = JSONObject().put("segments", rows).toString()
+                        if (skill == "retention") {
+                            extra = json
+                            seconds = ((memo.end - memo.start) / 1000.0).toString()
+                        } else data = json
+                        chooseTranscript = false
+                    })
+                }
+            }
+        }
         OutlinedTextField(extra, { extra = it }, enabled = !busy, maxLines = 4,
             label = { Text(when (skill) { "package" -> "Thumbnail wording"; "retention" -> "Optional transcript"; else -> "Additional context" }) })
         if (skill in listOf("package", "audit")) {
@@ -180,9 +215,12 @@ private fun CreatorWorkspace(project: StudioProject?, source: SourcePart?, close
         if (skill in localCreatorTools) OutlinedButton(enabled = !busy && data.isNotBlank(), onClick = { execute(true) }) { Text("Run local tool") }
         Button(enabled = !busy && data.isNotBlank(), onClick = {
             if (key.isBlank() || model.isBlank()) settings = true else execute(false)
-        }) { Text(if (key.isBlank()) "Set up Claude" else if (history.length() == 0) "Send to Claude" else "Send follow-up") }
+        }) { Text(if (key.isBlank() || model.isBlank()) "Set up Claude" else if (history.length() == 0) "Send to Claude" else "Send follow-up") }
         if (busy) LinearProgressIndicator()
-        if (output.isNotEmpty()) SelectionContainer { Text(output) }
+        if (output.isNotEmpty()) {
+            TextButton(onClick = { clipboard.setText(AnnotatedString(output)) }) { Text("Copy result") }
+            SelectionContainer { Text(output) }
+        }
         if (history.length() > 0) TextButton(enabled = !busy, onClick = { history = JSONArray(); output = "" }) { Text("New conversation") }
     }
 }

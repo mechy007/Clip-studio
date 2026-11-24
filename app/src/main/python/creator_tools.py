@@ -22,6 +22,7 @@ def run(root, skill, data, extra="", duration=0):
             return str(path)
 
         def transcript(value):
+            value = value.lstrip("\ufeff")
             if value.lstrip().startswith(("[", "{")):
                 parsed = json.loads(value)
                 if isinstance(parsed, list):
