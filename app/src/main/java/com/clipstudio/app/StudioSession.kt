@@ -315,19 +315,18 @@ internal object StudioSession {
         if (!segmented) {
             check(offset == 0L) { "Could not resume this format. Completed sections are still available." }
             describe(Work.IMPORT, "Preparing full-video import")
+            val latestSpeed = java.util.concurrent.atomic.AtomicLong(0L)
             val uri = YouTubeVideoImporter.download(
                 app, link, 1080,
-                onSpeed = { bytesPerSecond ->
-                    scope.launch {
-                        if (jobs[Work.IMPORT]?.isActive == true) {
-                            val rate = android.text.format.Formatter.formatShortFileSize(app, bytesPerSecond) + "/s"
-                            describe(Work.IMPORT, "Downloading full video · $rate")
-                        }
-                    }
-                }
+                onSpeed = { bytesPerSecond -> latestSpeed.set(bytesPerSecond) }
             ) { percent ->
                 scope.launch {
-                    if (jobs[Work.IMPORT]?.isActive == true) describe(Work.IMPORT, "Downloading full video · $percent%")
+                    if (jobs[Work.IMPORT]?.isActive == true) {
+                        val rate = latestSpeed.get().takeIf { it > 0L }?.let {
+                            " · ${android.text.format.Formatter.formatShortFileSize(app, it)}/s"
+                        }.orEmpty()
+                        describe(Work.IMPORT, "Downloading full video · $percent%$rate")
+                    }
                 }
             }
             addPart(app, SourcePart(uri, 0, StudioMedia.duration(app, uri)))

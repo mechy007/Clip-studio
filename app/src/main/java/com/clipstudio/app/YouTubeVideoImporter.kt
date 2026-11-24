@@ -125,6 +125,7 @@ object YouTubeVideoImporter {
 
                     val rendered = File(staging, "video.mp4")
                     var firstFailure: Exception? = null
+                    var forbiddenFailure: Exception? = null
                     var completed = false
                     for ((attempt, preferDash) in listOf(true, false).withIndex()) {
                         if (attempt > 0) clearStaging()
@@ -143,6 +144,9 @@ object YouTubeVideoImporter {
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (error: Exception) {
+                            if (YouTubeDownloadValidation.isForbidden(error.message.orEmpty())) {
+                                forbiddenFailure = error
+                            }
                             if (firstFailure == null) firstFailure = error else firstFailure.addSuppressed(error)
                             android.util.Log.w(
                                 "ClipStudioYouTube",
@@ -153,8 +157,8 @@ object YouTubeVideoImporter {
                         }
                     }
                     if (!completed) {
-                        val failure = firstFailure ?: IllegalStateException("YouTube download failed.")
-                        if (YouTubeDownloadValidation.isForbidden(failure.message.orEmpty())) {
+                        val failure = forbiddenFailure ?: firstFailure ?: IllegalStateException("YouTube download failed.")
+                        if (forbiddenFailure != null || YouTubeDownloadValidation.isForbidden(failure.message.orEmpty())) {
                             throw IllegalStateException(
                                 "YouTube refused this download (HTTP 403). Try a different permitted recording, or import a local MP4. The bundled extractor may need updating.",
                                 failure
