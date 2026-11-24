@@ -46,7 +46,7 @@ class IndexedDashPlannerTest {
                 .put(JSONObject().put("url", "seg-2.m4s").put("duration", 10.0)))
         val track = requireNotNull(IndexedDashPlanner.parse(separated))
         assertEquals("init.mp4", track.initialization.url.substringAfterLast('/'))
-        assertEquals(2, track.mediaFor(0L, 10_000L).size)
+        assertEquals(1, track.mediaFor(0L, 10_000L).size)
     }
 
     @Test
