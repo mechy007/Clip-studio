@@ -4,6 +4,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -347,7 +349,9 @@ class MainActivity : ComponentActivity() {
             bottomBar = {
                 Column(Modifier.navigationBarsPadding().padding(horizontal = 8.dp, vertical = 5.dp)) {
                     if (tab != StudioTab.Editor && selected != null && project != null) {
-                        val draft = project.drafts.values.lastOrNull { it.edit.part == selected.part }
+                        val partDrafts = project.drafts.filterValues { it.edit.part == selected.part }
+                        val draft = draftChoice?.takeIf { draftProject == project.id && draftPart == selected.part.uri.toString() }
+                            ?.let(partDrafts::get) ?: partDrafts.values.lastOrNull()
                         if (draft != null) Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Text("Active clip · ${draft.edit.layout.label} · ${timestamp(draft.edit.end - draft.edit.start)}",
@@ -382,7 +386,7 @@ class MainActivity : ComponentActivity() {
         ) { inset ->
             pages.SaveableStateProvider(tab.name) {
                 Column(
-                    Modifier.fillMaxSize().padding(inset).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 18.dp),
+                    Modifier.fillMaxSize().padding(inset).wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = 840.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     state.storageWarning?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -743,31 +747,6 @@ class MainActivity : ComponentActivity() {
                         StudioTab.Projects -> {
                             StudioPageTitle("Projects & exports", "Export queue, device storage and saved recordings.")
                             StudioStorage()
-                            var savedProjectsOpen by rememberSaveable { mutableStateOf(true) }
-                            SettingsDisclosure("Saved projects · ${state.library.projects.size}", savedProjectsOpen,
-                                { savedProjectsOpen = !savedProjectsOpen }) {
-                                if (state.library.projects.isEmpty()) Text("Imported recordings will appear here.")
-                                state.library.projects.forEach { item ->
-                                    Card(
-                                        onClick = {
-                                            if (project?.id != item.id) {
-                                                selectedPart = null
-                                                chosenMoment = -1L
-                                                incomingLayout = item.layout
-                                                StudioSession.openProject(item.id)
-                                            }
-                                            tab = StudioTab.Editor
-                                        },
-                                        enabled = !occupied, modifier = Modifier.fillMaxWidth(),
-                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                                    ) {
-                                        Column(Modifier.padding(14.dp)) {
-                                            Text(item.name, style = MaterialTheme.typography.titleMedium)
-                                            Text("${item.exports.size} exports", style = MaterialTheme.typography.labelMedium)
-                                        }
-                                    }
-                                }
-                            }
                             if (project?.guidedImport == true && project.parts.isNotEmpty()) {
                                 var storageOpen by rememberSaveable { mutableStateOf(false) }
                                 SettingsDisclosure("Free up storage", storageOpen, { storageOpen = !storageOpen }) {
@@ -852,6 +831,32 @@ class MainActivity : ComponentActivity() {
                                     }) { Text("Open MP4") }
                                     OutlinedButton(onClick = { share(state.exports) }) {
                                         Text("Share ${if (state.exports.size == 1) "MP4" else "clips"}")
+                                    }
+                                }
+                            }
+                            var savedProjectsOpen by rememberSaveable { mutableStateOf(true) }
+                            SettingsDisclosure("Saved projects · ${state.library.projects.size}", savedProjectsOpen,
+                                { savedProjectsOpen = !savedProjectsOpen }) {
+                                if (state.library.projects.isEmpty()) Text("Imported recordings will appear here.")
+                                state.library.projects.forEach { item ->
+                                    Card(
+                                        onClick = {
+                                            if (project?.id != item.id) {
+                                                selectedPart = null
+                                                chosenMoment = -1L
+                                                incomingLayout = item.layout
+                                                StudioSession.openProject(item.id)
+                                            }
+                                            tab = StudioTab.Editor
+                                        },
+                                        enabled = !occupied, modifier = Modifier.fillMaxWidth(),
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                    ) {
+                                        Column(Modifier.padding(14.dp)) {
+                                            Text(item.name, style = MaterialTheme.typography.titleMedium)
+                                            if (item.id == project?.id) Text("Active project", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+                                            Text("${item.exports.size} exports", style = MaterialTheme.typography.labelMedium)
+                                        }
                                     }
                                 }
                             }
