@@ -214,7 +214,7 @@ internal object StudioMedia {
                 check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
             } ?: if (indexedDash) {
                 // DASH fragment formats use http_dash_segments rather than the direct HTTPS protocol.
-                recordingFormatSelector(height).replace("[protocol=https]", "")
+                recordingFormatSelector(height).replace("[protocol=https]", "[protocol=http_dash_segments]")
             } else recordingFormatSelector(height)
             val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$id")
                 .addOption("--no-playlist")
