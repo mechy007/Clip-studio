@@ -70,6 +70,9 @@ internal data class GuidedDownloadProgress(
 /** Bounded parallelism for independent guided-download time ranges. */
 internal fun guidedDownloadConcurrency(fast: Boolean): Int = if (fast) 3 else 2
 
+/** DASH fragment HTTP requests are lighter than simultaneous FFmpeg section jobs. */
+internal fun indexedDashParallelism(fast: Boolean): Int = if (fast) 8 else 4
+
 internal fun guidedDownloadProgress(
     totalMs: Long, savedMs: Long, processedMs: Long, elapsedMs: Long
 ): GuidedDownloadProgress {
