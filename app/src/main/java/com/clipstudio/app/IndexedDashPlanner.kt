@@ -83,7 +83,7 @@ internal object IndexedDashPlanner {
             // DASH BaseURL query parameters can carry signed CDN authorization. Preserve
             // them when a relative segment path does not provide its own query.
             val withBaseQuery = if (resolved.rawQuery == null && baseUri.rawQuery != null) {
-                URI(resolved.scheme, resolved.rawAuthority, resolved.rawPath, baseUri.rawQuery, resolved.rawFragment)
+                URI.create(resolved.toASCIIString() + "?" + baseUri.rawQuery)
             } else resolved
             withBaseQuery.toString()
         }.getOrNull()
