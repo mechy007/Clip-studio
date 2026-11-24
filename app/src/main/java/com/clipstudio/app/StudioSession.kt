@@ -134,11 +134,11 @@ internal object StudioSession {
 
     fun importYouTube(
         context: Context, link: String, layout: Layout, guided: Boolean = false, startMs: Long = 0,
-        fromFull: Boolean = false, fastParts: Boolean = false
+        fromFull: Boolean = false
     ) =
         work(context, Work.IMPORT, "Opening YouTube recording") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
-            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided, startMs, fromFull, fastParts)
+            newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id", guided, startMs, fromFull)
             if (guided) importGuidedPart(app) else importRecording(app, link)
         }
 
@@ -146,7 +146,7 @@ internal object StudioSession {
         work(context, Work.IMPORT, "Opening recording for analysis", "Analysis paused · saved samples kept") { app ->
             val id = YouTubeLinkClassifier.parseVideoId(link)
             newProject("YouTube · $id", layout, "https://www.youtube.com/watch?v=$id",
-                guided = true, startMs = startMs, fastParts = true, scanFirst = true)
+                guided = true, startMs = startMs, scanFirst = true)
             scanCurrentRecording(app)
         }
 
@@ -202,13 +202,12 @@ internal object StudioSession {
         if (openedEditor) status("Download queue complete")
     }
 
-    fun resume(context: Context, useFullDownload: Boolean = false, useFastParts: Boolean = false) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
+    fun resume(context: Context, useFullDownload: Boolean = false) = work(context, Work.IMPORT, "Resuming YouTube recording") { app ->
         val project = state.value.project ?: return@work
         val link = project.youtubeLink ?: return@work
         if (!project.importComplete && project.scannedParts == null) {
             if (project.guidedImport) {
                 if (useFullDownload) save(project.copy(guidedFromFull = true, fastGuidedParts = false))
-                else if (useFastParts) save(project.copy(guidedFromFull = false, fastGuidedParts = true))
                 importGuidedPart(app)
             } else importRecording(app, link)
         }
@@ -261,7 +260,7 @@ internal object StudioSession {
                 publish = publish)
         } else {
             StudioMedia.downloadRecordingPart(app, project.id, link, start,
-                if (selected == null) previous?.formatId else null, fast = project.fastGuidedParts, requestedEndMs = selected?.range?.endMs, quality = download?.quality, progress = { progress ->
+                if (selected == null) previous?.formatId else null, requestedEndMs = selected?.range?.endMs, quality = download?.quality, progress = { progress ->
                     scope.launch {
                         if (jobs[Work.IMPORT] != activeImport || activeImport?.isActive != true || revision != guidedProgressRevision) return@launch
                         val current = state.value.guidedDownload
@@ -619,13 +618,13 @@ internal object StudioSession {
 
     private fun newProject(
         name: String, layout: Layout, link: String? = null, guided: Boolean = false, startMs: Long = 0,
-        fromFull: Boolean = false, fastParts: Boolean = false, scanFirst: Boolean = false
+        fromFull: Boolean = false, scanFirst: Boolean = false
     ) {
         autoAnalyze = true
         clearPlayback()
         update { it.copy(exports = emptyList(), transcripts = emptyMap(), joined = null, guidedPart = null, status = "") }
         save(StudioProject(name, layout, emptyList(), youtubeLink = link, guidedImport = guided,
-            guidedStartMs = startMs, guidedFromFull = guided && fromFull, fastGuidedParts = guided && fastParts && !fromFull,
+            guidedStartMs = startMs, guidedFromFull = guided && fromFull,
             scannedParts = if (scanFirst) emptyList() else null))
     }
 
