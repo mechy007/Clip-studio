@@ -1,5 +1,14 @@
 package com.clipstudio.app
 
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import android.Manifest
 import android.provider.Settings
 import android.text.format.Formatter
@@ -113,17 +122,33 @@ class MainActivity : ComponentActivity() {
         handleQueueIntent(intent)
         enableEdgeToEdge()
         setContent {
-            MaterialTheme(colorScheme = StudioColors) { Dashboard() }
+            val preferences = remember { getSharedPreferences("studio-ui", MODE_PRIVATE) }
+            var palette by remember { mutableStateOf(preferences.getString("palette", "Mint") ?: "Mint") }
+            val colors = when (palette) {
+                "AMOLED" -> StudioColors.copy(background = Color.Black, surface = Color(0xFF0A0C10),
+                    surfaceVariant = Color(0xFF131720), primary = Color(0xFF6EE7B7), secondary = Color(0xFFFBBF24))
+                "Cyber" -> StudioColors.copy(background = Color(0xFF080A16), surface = Color(0xFF111428),
+                    surfaceVariant = Color(0xFF1A1F3C), primary = Color(0xFF38BDF8), secondary = Color(0xFFF472B6),
+                    primaryContainer = Color(0xFF173953), onPrimaryContainer = Color(0xFFC4EBFF),
+                    onSurfaceVariant = Color(0xFFBBC3EF), onPrimary = Color(0xFF041224))
+                else -> StudioColors
+            }
+            MaterialTheme(colorScheme = colors) {
+                Dashboard(palette) { palette = it; preferences.edit().putString("palette", it).apply() }
+            }
         }
     }
 
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
-    private fun Dashboard() {
+    private fun Dashboard(palette: String, setPalette: (String) -> Unit) {
         val state by StudioSession.state.collectAsState()
         val project = state.project
         var tab by rememberSaveable { mutableStateOf(StudioTab.Home) }
         var exportRequest by rememberSaveable { mutableStateOf(0) }
+        var appearance by remember { mutableStateOf(false) }
+        var recipeDraft by rememberSaveable { mutableStateOf<String?>(null) }
+        var recipe by rememberSaveable { mutableStateOf<StudioRecipe?>(null) }
         val pages = rememberSaveableStateHolder()
         var link by rememberSaveable { mutableStateOf("") }
         var guidedImport by rememberSaveable { mutableStateOf(false) }
@@ -271,17 +296,29 @@ class MainActivity : ComponentActivity() {
                         Image(painterResource(R.drawable.studio_mark), null, Modifier.size(36.dp))
                         Column(Modifier.weight(1f)) {
                             Text("Clip Studio", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                            project?.takeIf { tab != StudioTab.Home }?.let {
+                            project?.let {
                                 Text(it.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                        IconButton(onClick = {
-                            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
-                        }) {
-                            Icon(painterResource(R.drawable.nav_bell), "Notification settings")
+                        CreatorSkills(project, selected?.part, compact = true)
+                        Box {
+                            IconButton(onClick = { appearance = true }) {
+                                Text("⋮", style = MaterialTheme.typography.headlineSmall,
+                                    modifier = Modifier.semantics { contentDescription = "Appearance and notifications" })
+                            }
+                            DropdownMenu(appearance, { appearance = false }) {
+                                listOf("Mint", "AMOLED", "Cyber").forEach { theme ->
+                                    DropdownMenuItem(text = { Text(if (theme == palette) "✓  $theme" else theme) },
+                                        onClick = { setPalette(theme); appearance = false })
+                                }
+                                DropdownMenuItem(text = { Text("Notification settings") }, onClick = {
+                                    appearance = false
+                                    startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+                                })
+                            }
                         }
                         if (tab == StudioTab.Editor) Button(enabled = selected != null, onClick = {
                             tab = StudioTab.Editor
@@ -308,9 +345,20 @@ class MainActivity : ComponentActivity() {
                 }
             },
             bottomBar = {
-                Column {
-                    HorizontalDivider()
-                    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                Column(Modifier.navigationBarsPadding().padding(horizontal = 8.dp, vertical = 5.dp)) {
+                    if (tab != StudioTab.Editor && selected != null && project != null) {
+                        val draft = project.drafts.values.lastOrNull { it.edit.part == selected.part }
+                        if (draft != null) Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text("Active clip · ${draft.edit.layout.label} · ${timestamp(draft.edit.end - draft.edit.start)}",
+                                Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium)
+                            TextButton(enabled = !exporting, onClick = { tab = StudioTab.Editor }) { Text("Resume") }
+                        }
+                    }
+                    NavigationBar(modifier = Modifier.clip(RoundedCornerShape(28.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(28.dp)),
+                        windowInsets = WindowInsets(0, 0, 0, 0), containerColor = MaterialTheme.colorScheme.surface) {
                         StudioTab.entries.forEach { page ->
                             val count = when (page) {
                                 StudioTab.Highlights -> suggestions.size
@@ -343,19 +391,19 @@ class MainActivity : ComponentActivity() {
                             availableParts.sumOf { it.highlights.orEmpty().size }, suggestions.firstOrNull(), !exporting,
                             onImport = { tab = StudioTab.Import }, onEdit = { tab = StudioTab.Editor },
                             onHighlights = { tab = StudioTab.Highlights }, onProjects = { tab = StudioTab.Projects },
-                            onHighlight = ::editHighlight)
+                            onHighlight = ::editHighlight, onRecipe = { choice ->
+                                selected?.part?.let { part ->
+                                    createDraft(part)
+                                    recipeDraft = draftChoice
+                                    recipe = choice
+                                    tab = StudioTab.Editor
+                                }
+                            })
                         StudioTab.Import -> {
                             StudioPageTitle("Import footage", "Open a local recording or pick parts from a YouTube replay.")
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text("From your phone", style = MaterialTheme.typography.titleMedium)
-                                    OutlinedButton(enabled = !occupied, modifier = Modifier.fillMaxWidth(),
-                                        onClick = { picker.launch(arrayOf("video/*")) }) { Text("Choose video") }
-                                }
-                            }
-                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text("From YouTube", style = MaterialTheme.typography.titleMedium)
+                                    Text("Stream / VOD link", style = MaterialTheme.typography.titleMedium)
                                     OutlinedTextField(
                                         value = link, onValueChange = { link = it }, singleLine = true,
                                         enabled = !occupied, label = { Text("YouTube recording URL") }, modifier = Modifier.fillMaxWidth()
@@ -411,6 +459,13 @@ class MainActivity : ComponentActivity() {
                             SettingsDisclosure("Starting layout · ${incomingLayout.label}", importSettings,
                                 { importSettings = !importSettings }) {
                                 LayoutPicker(incomingLayout, !occupied) { incomingLayout = it }
+                            }
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text("From your phone", style = MaterialTheme.typography.titleMedium)
+                                    OutlinedButton(enabled = !occupied, modifier = Modifier.fillMaxWidth(),
+                                        onClick = { picker.launch(arrayOf("video/*")) }) { Text("Choose video") }
+                                }
                             }
                             if (occupied) {
                                 state.jobs.forEach { (work, label) ->
@@ -542,7 +597,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         StudioTab.Highlights -> {
-                            StudioPageTitle("Highlights", "Whisper finds spoken moments. Motion and audio cues help find other clips.")
+                            StudioPageTitle("AI highlights", "Whisper finds spoken moments. Motion and audio cues help find other clips.")
                             if (project == null || availableParts.isEmpty()) {
                                 Text("Import or download a recording to find highlights.")
                                 Button(onClick = { tab = StudioTab.Import }) { Text("Open import") }
@@ -680,13 +735,14 @@ class MainActivity : ComponentActivity() {
                             }
                             key(project.id, part.uri, activeDraft) {
                                 ClipEditor(part, project, state, activeDraft, chosenMoment, chosenEnd, momentSelection,
-                                    exportRequest, ::showNotificationPermission, onBookmarkDraft = { time ->
+                                    exportRequest, recipe.takeIf { recipeDraft == activeDraft }, ::showNotificationPermission, onBookmarkDraft = { time ->
                                         createDraft(part, time, minOf(part.durationMs, time + 15_000))
                                     })
                             }
                         }
                         StudioTab.Projects -> {
-                            StudioPageTitle("Projects", "Reopen a recording or manage its exports and storage.")
+                            StudioPageTitle("Projects & exports", "Export queue, device storage and saved recordings.")
+                            StudioStorage()
                             var savedProjectsOpen by rememberSaveable { mutableStateOf(true) }
                             SettingsDisclosure("Saved projects · ${state.library.projects.size}", savedProjectsOpen,
                                 { savedProjectsOpen = !savedProjectsOpen }) {
