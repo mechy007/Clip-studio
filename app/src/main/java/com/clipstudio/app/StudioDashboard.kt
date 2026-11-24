@@ -55,6 +55,7 @@ internal fun StudioOverview(
     onProjects: () -> Unit, onHighlight: (SourcePart, Highlight) -> Unit
 ) {
     StudioPageTitle("Workspace")
+    CreatorSkills(project, source)
     val context = LocalContext.current
     val artwork by produceState<ImageBitmap?>(null, source?.uri) {
         value = null

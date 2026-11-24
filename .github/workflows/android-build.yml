@@ -37,6 +37,9 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Exercise bundled creator skills
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s app/src/test/python
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 

@@ -5,6 +5,7 @@ import java.security.MessageDigest
 
 plugins {
     id("com.android.application")
+    id("com.chaquo.python") version "16.1.0"
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
@@ -167,8 +168,8 @@ android {
         applicationId = "com.clipstudio.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 24
-        versionName = "0.5.18"
+        versionCode = 25
+        versionName = "0.5.19"
         ndk.abiFilters += "arm64-v8a"
         externalNativeBuild { cmake { cppFlags += "-std=c++17" } }
     }

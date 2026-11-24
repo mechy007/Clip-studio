@@ -8,3 +8,7 @@
 - [ML Kit Face Detection](https://developers.google.com/ml-kit/vision/face-detection/android) provides on-device face detection.
 
 - [AI Video Captions](https://github.com/nicolaigaina/ai-video-captions) (MIT, AutoShorts) supplied the Bounce and Karaoke Wipe animation logic, adapted to Clip Studio’s Kotlin ASS renderer. The upstream MIT license is included in app assets.
+
+YouTube creator skills by Jake Schincariol are bundled under MIT from
+Jakeschincariol/youtube-agent-skill at a2feb2104981a375ffd4f87ee04f4f5344ac43c6.
+The original license is included in app/src/main/assets/youtube-agent/LICENSE.
