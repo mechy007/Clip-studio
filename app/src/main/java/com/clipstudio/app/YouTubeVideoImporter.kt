@@ -30,9 +30,23 @@ object YouTubeVideoImporter {
         initialized = true
     }
 
+    /**
+     * Stream-copy sections go through [ParallelSectionCopy] first, which uses several connections at once.
+     * If that cannot run for any reason, the single-connection yt-dlp download below is used as before.
+     */
     internal suspend fun downloadSection(
         context: Context, link: String, format: String, range: RecordingPartWindow, directory: File,
         copyTracks: Boolean = false, progress: (Long) -> Unit
+    ): File {
+        if (copyTracks) {
+            ParallelSectionCopy.download(context, link, format, range, directory, progress)?.let { return it }
+        }
+        return downloadSectionSingle(context, link, format, range, directory, copyTracks, progress)
+    }
+
+    private suspend fun downloadSectionSingle(
+        context: Context, link: String, format: String, range: RecordingPartWindow, directory: File,
+        copyTracks: Boolean, progress: (Long) -> Unit
     ): File {
         val processId = UUID.randomUUID().toString()
         try {
