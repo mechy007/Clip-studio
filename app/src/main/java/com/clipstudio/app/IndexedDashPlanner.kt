@@ -65,7 +65,12 @@ internal object IndexedDashPlanner {
             val durationSeconds = fragment.optDouble("duration", Double.NaN)
             val hasDuration = durationSeconds.isFinite() && durationSeconds > 0.0
             if (!hasDuration) {
-                if (initializationSeen) continue
+                if (initializationSeen) {
+                    val duplicateInitialization = initializationUrl != null &&
+                        resolveUrl(base, initializationUrl) == resolved
+                    if (duplicateInitialization) continue
+                    return null
+                }
                 if (parsed.isNotEmpty()) return null
                 initializationSeen = true
                 parsed += IndexedDashFragment(index, resolved, 0L, 0L, initialization = true)
