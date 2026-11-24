@@ -627,7 +627,7 @@ internal object StudioMedia {
         try {
             val section = try {
                 YouTubeVideoImporter.downloadSection(
-                    context, link, format, range, staging,
+                    context, link, format, range, staging, copyTracks = true,
                     onSpeed = onSpeed, onBytesFetched = onBytesFetched
                 ) { progress(it * 3 / 4) }
             } catch (cancelled: CancellationException) {
@@ -637,7 +637,15 @@ internal object StudioMedia {
                     "YouTube refused the requested video range." else "The alternate downloader could not fetch this range."
                 error("$message Saved pieces were kept. Retry this part or use full import.")
             }
-            check(recordingDuration(context, section, range.lengthMs) != null) {
+            val actualDuration = recordingDuration(context, section, range.lengthMs, requireAudio = true)
+            val copyReady = actualDuration != null && abs(actualDuration - range.lengthMs) <= 350L &&
+                FastMedia.matchesDownloadedPart(context, Uri.fromFile(section))
+            if (copyReady) {
+                check(section.renameTo(output)) { "Could not save the downloaded section. Saved pieces were kept." }
+                progress(range.lengthMs)
+                return
+            }
+            check(actualDuration != null) {
                 "The alternate downloader returned an incomplete range. Saved pieces were kept."
             }
             check(encodeRecordingChunk(
