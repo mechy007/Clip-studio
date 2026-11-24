@@ -99,10 +99,21 @@ internal object IndexedDashPlanner {
             // segment paths add their own query (for example, sq=7). Keep both.
             val query = if (fragmentUri.isAbsolute || baseUri.rawQuery == null) {
                 resolved.rawQuery
-            } else listOfNotNull(baseUri.rawQuery, resolved.rawQuery).joinToString("&").ifBlank { null }
+            } else mergeQuery(baseUri.rawQuery, resolved.rawQuery)
             val prefix = resolved.toASCIIString().substringBefore("?").substringBefore("#")
             URI.create(prefix + (query?.let { "?$it" } ?: "")).toString()
         }.getOrNull()
+    }
+
+    private fun mergeQuery(baseQuery: String, segmentQuery: String?): String {
+        val parameters = linkedMapOf<String, String>()
+        baseQuery.split("&").filter(String::isNotBlank).forEach { parameter ->
+            parameters[parameter.substringBefore("=")] = parameter
+        }
+        segmentQuery.orEmpty().split("&").filter(String::isNotBlank).forEach { parameter ->
+            parameters[parameter.substringBefore("=")] = parameter
+        }
+        return parameters.values.joinToString("&")
     }
 
     fun parseSelectedFormats(media: JSONObject): List<IndexedDashTrack>? {
