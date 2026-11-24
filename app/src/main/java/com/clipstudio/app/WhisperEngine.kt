@@ -2,6 +2,9 @@ package com.clipstudio.app
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 data class TranscriptSegment(
@@ -35,15 +38,18 @@ object WhisperEngine {
         System.loadLibrary("clipstudio_whisper")
     }
 
+    private val sessionLock = Mutex()
+
     private external fun loadModel(modelPath: String): Boolean
     private external fun transcribe(
         audioSamples: FloatArray,
         threadCount: Int,
-        language: String?
+        language: String?,
+        wordTiming: Boolean
     ): Array<Array<String>>?
     private external fun releaseModel()
 
-    suspend fun beginSession(context: Context) = withContext(Dispatchers.Default) {
+    private suspend fun beginSession(context: Context) = withContext(Dispatchers.Default) {
         val model = WhisperModelManager.modelFile(context)
         require(model.isFile) { "The bundled offline AI model is not installed." }
         check(loadModel(model.absolutePath)) {
@@ -51,21 +57,31 @@ object WhisperEngine {
         }
     }
 
-    suspend fun endSession() = withContext(Dispatchers.Default) {
+    private suspend fun endSession() = withContext(Dispatchers.Default) {
         releaseModel()
+    }
+
+    internal suspend fun <T> session(context: Context, transcribe: suspend () -> T): T = sessionLock.withLock {
+        try {
+            beginSession(context)
+            transcribe()
+        } finally {
+            withContext(NonCancellable) { endSession() }
+        }
     }
 
     suspend fun transcribe16Khz(
         context: Context,
         audioSamples: FloatArray,
-        language: String? = null
+        language: String? = null,
+        wordTiming: Boolean = true
     ): List<TranscriptSegment> = withContext(Dispatchers.Default) {
         require(audioSamples.isNotEmpty()) { "Audio is empty." }
         val model = WhisperModelManager.modelFile(context)
         require(model.isFile) { "The bundled offline AI model is not installed." }
 
         val threads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 4)
-        val rows = transcribe(audioSamples, threads, language)
+        val rows = transcribe(audioSamples, threads, language, wordTiming)
             ?: error("Whisper could not transcribe this audio.")
 
         fun parse(row: String): TimedWord? {

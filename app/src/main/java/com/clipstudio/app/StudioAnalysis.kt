@@ -2,7 +2,6 @@ package com.clipstudio.app
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -16,19 +15,48 @@ internal object StudioAnalysis {
     private const val CHUNK_SAMPLES = SAMPLE_RATE * 30
     const val MAX_CAPTION_DURATION_MS = 120_000L
 
-    suspend fun highlights(context: Context, part: SourcePart, mode: HighlightMode): List<Highlight> = withContext(Dispatchers.IO) {
+    suspend fun highlights(
+        context: Context, part: SourcePart, mode: HighlightMode, progress: suspend (String) -> Unit
+    ): List<Highlight> = withContext(Dispatchers.IO) {
         val pcm = File.createTempFile("studio-signals-", ".pcm", context.cacheDir)
         try {
+            progress("Reading source audio")
+            val hasAudio = StudioMedia.decodeAudio(context, part, pcm, 0, part.durationMs)
+            val energy = if (hasAudio) readEnergy(pcm) else emptyList()
+            val speech = mutableListOf<TranscriptSegment>()
+            if (energy.any { it.rms >= .0015f && it.peak >= .004f }) {
+                try {
+                    transcribePcm(context, pcm, startMs = 0, language = null, wordTiming = false,
+                        progress = { position ->
+                            val percent = (position.coerceAtMost(part.durationMs) * 100.0 / part.durationMs).toInt()
+                            progress("Whisper speech scan · $percent%")
+                        }, collect = { speech.addAll(it) })
+                } catch (failure: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    android.util.Log.w("ClipStudioHighlights", "Speech scan was incomplete", failure)
+                } catch (failure: LinkageError) {
+                    android.util.Log.w("ClipStudioHighlights", "Offline Whisper unavailable", failure)
+                }
+            }
+
+            progress("Checking motion and audio cues")
             val visual = try {
                 SceneChangeAnalyzer.analyze(context, part.uri, part.durationMs)
-            } catch (error: Exception) {
+            } catch (_: Exception) {
                 currentCoroutineContext().ensureActive()
                 emptyList()
             }
-            val hasAudio = StudioMedia.decodeAudio(context, part, pcm, 0, part.durationMs)
-            val energy = if (hasAudio) readEnergy(pcm) else emptyList()
-            val reactions = if (hasAudio) AudioEventClassifier.analyze(context, pcm) else emptyList()
-            rankHighlights(part.durationMs, energy, reactions, visual, mode = mode)
+            val reactions = if (hasAudio) {
+                try {
+                    AudioEventClassifier.analyze(context, pcm)
+                } catch (_: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    emptyList()
+                } catch (_: LinkageError) {
+                    emptyList()
+                }
+            } else emptyList()
+            speechFirstHighlights(part.durationMs, speech, energy, reactions, visual, mode)
         } finally {
             pcm.delete()
         }
@@ -43,31 +71,37 @@ internal object StudioAnalysis {
                     "Could not read audio track ${audioTrack + 1} for captions."
                 }
                 if (pcm.length() < 4) return@withContext emptyList<TranscriptSegment>()
-                WhisperModelManager.ensureModel(context) { _, _ -> }
-                try {
-                    WhisperEngine.beginSession(context)
-                    val transcript = mutableListOf<TranscriptSegment>()
-                    var index = 0L
-                    pcm.dataInput().use { input ->
-                        while (true) {
-                            currentCoroutineContext().ensureActive()
-                            val audio = input.readFloats(CHUNK_SAMPLES)
-                            if (audio.isEmpty()) break
-                            if (audio.any { abs(it) > .004f }) {
-                                val offset = startMs + index * 30_000L
-                                transcript += WhisperEngine.transcribe16Khz(context, audio, language).map { it.shiftedBy(offset) }
-                            }
-                            index++
-                        }
-                    }
-                    transcript
-                } finally {
-                    withContext(NonCancellable) { WhisperEngine.endSession() }
-                }
+                val transcript = mutableListOf<TranscriptSegment>()
+                transcribePcm(context, pcm, startMs, language, wordTiming = true, progress = {}) { transcript.addAll(it) }
+                transcript.toList()
             } finally {
                 pcm.delete()
             }
         }
+
+    private suspend fun transcribePcm(
+        context: Context, pcm: File, startMs: Long, language: String?, wordTiming: Boolean,
+        progress: suspend (Long) -> Unit, collect: (List<TranscriptSegment>) -> Unit
+    ) {
+        progress(0L)
+        WhisperModelManager.ensureModel(context) { _, _ -> }
+        WhisperEngine.session(context) {
+            var consumedMs = 0L
+            pcm.dataInput().use { input ->
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val audio = input.readFloats(CHUNK_SAMPLES)
+                    if (audio.isEmpty()) break
+                    if (audio.any { abs(it) > .004f }) {
+                        val offset = startMs + consumedMs
+                        collect(WhisperEngine.transcribe16Khz(context, audio, language, wordTiming).map { it.shiftedBy(offset) })
+                    }
+                    consumedMs += audio.size * 1000L / SAMPLE_RATE
+                    progress(consumedMs)
+                }
+            }
+        }
+    }
 
     private suspend fun readEnergy(pcm: File): List<AudioEnergyWindow> = buildList {
         pcm.dataInput().use { input ->

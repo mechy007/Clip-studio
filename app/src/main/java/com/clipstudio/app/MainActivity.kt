@@ -66,6 +66,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.util.Locale
 import java.util.UUID
@@ -74,19 +75,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 private val StudioColors = darkColorScheme(
-    primary = Color(0xFFA78BFA), onPrimary = Color(0xFF19102D),
-    secondary = Color(0xFF6EE7B7), background = Color(0xFF0B0C10),
-    surface = Color(0xFF12141C), surfaceVariant = Color(0xFF191C27),
-    primaryContainer = Color(0xFF2E1F5E), onPrimaryContainer = Color(0xFFDDD6FE),
-    secondaryContainer = Color(0xFF2E1F5E), onSecondaryContainer = Color(0xFFDDD6FE),
-    onSurface = Color(0xFFF1F5F9), onSurfaceVariant = Color(0xFFA9B4C8),
-    outline = Color(0xFF606A85), outlineVariant = Color(0xFF2D3348)
+    primary = Color(0xFFA6F0CD), onPrimary = Color(0xFF10291F),
+    secondary = Color(0xFFF5C991), background = Color(0xFF0B1017),
+    surface = Color(0xFF111924), surfaceVariant = Color(0xFF1A2635),
+    primaryContainer = Color(0xFF214535), onPrimaryContainer = Color(0xFFC0F8DB),
+    secondaryContainer = Color(0xFF3D3125), onSecondaryContainer = Color(0xFFFFDEB3),
+    onSurface = Color(0xFFF0F4F9), onSurfaceVariant = Color(0xFFB8C4D3),
+    outline = Color(0xFF687B90), outlineVariant = Color(0xFF2A394A)
 )
 
 private enum class StudioTab(val title: String, val icon: Int) {
-    Editor("Editor", R.drawable.nav_editor),
+    Home("Home", R.drawable.nav_home),
     Import("Import", R.drawable.nav_import),
     Highlights("Highlights", R.drawable.nav_highlights),
+    Editor("Editor", R.drawable.nav_editor),
     Projects("Projects", R.drawable.nav_projects)
 }
 
@@ -105,7 +107,7 @@ class MainActivity : ComponentActivity() {
     private fun Dashboard() {
         val state by StudioSession.state.collectAsState()
         val project = state.project
-        var tab by rememberSaveable { mutableStateOf(StudioTab.Editor) }
+        var tab by rememberSaveable { mutableStateOf(StudioTab.Home) }
         var exportRequest by rememberSaveable { mutableStateOf(0) }
         val pages = rememberSaveableStateHolder()
         var link by rememberSaveable { mutableStateOf("") }
@@ -217,10 +219,16 @@ class MainActivity : ComponentActivity() {
                 dismissButton = { TextButton(onClick = { nextPartDialog = false }) { Text("Keep editing") } }
             )
         }
+        fun editHighlight(part: SourcePart, highlight: Highlight) {
+            selectedPart = part.uri.toString()
+            createDraft(part, highlight.startMs, highlight.endMs)
+            tab = StudioTab.Editor
+        }
         val suggestions = remember(project?.parts) {
             availableParts.flatMap { review ->
                 review.highlights.orEmpty().map { review.part to it }
-            }.sortedByDescending { it.second.score }.take(10)
+            }.sortedWith(compareByDescending<Pair<SourcePart, Highlight>> { it.second.speechExcerpt != null }
+                .thenByDescending { it.second.score }).take(10)
         }
         Scaffold(
             topBar = {
@@ -232,8 +240,8 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Image(painterResource(R.drawable.studio_mark), null, Modifier.size(36.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("Clip Studio", style = MaterialTheme.typography.titleMedium)
-                            project?.let {
+                            Text("Clip Studio", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                            project?.takeIf { tab != StudioTab.Home }?.let {
                                 Text(it.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -245,7 +253,7 @@ class MainActivity : ComponentActivity() {
                         }) {
                             Icon(painterResource(R.drawable.nav_bell), "Notification settings")
                         }
-                        Button(enabled = selected != null, onClick = {
+                        if (tab == StudioTab.Editor) Button(enabled = selected != null, onClick = {
                             tab = StudioTab.Editor
                             exportRequest++
                         }) { Text("Export") }
@@ -253,10 +261,8 @@ class MainActivity : ComponentActivity() {
                     HorizontalDivider()
                     val progress = state.guidedDownload
                     val activeWork = if (progress != null) Work.IMPORT else state.jobs.keys.firstOrNull()
-                    val label = activeWork?.let { state.jobs[it] } ?: state.status.ifBlank {
-                        if (project == null) "Ready to import" else "Editing on device"
-                    }
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    val label = activeWork?.let { state.jobs[it] } ?: state.status
+                    if (label.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(label, Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 5.dp), maxLines = 2,
                             overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.secondary,
                             style = MaterialTheme.typography.labelSmall)
@@ -298,12 +304,18 @@ class MainActivity : ComponentActivity() {
         ) { inset ->
             pages.SaveableStateProvider(tab.name) {
                 Column(
-                    Modifier.fillMaxSize().padding(inset).verticalScroll(rememberScrollState()).padding(14.dp),
+                    Modifier.fillMaxSize().padding(inset).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     state.storageWarning?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     when (tab) {
+                        StudioTab.Home -> StudioOverview(project, selected?.part,
+                            availableParts.sumOf { it.highlights.orEmpty().size }, suggestions.firstOrNull(), !exporting,
+                            onImport = { tab = StudioTab.Import }, onEdit = { tab = StudioTab.Editor },
+                            onHighlights = { tab = StudioTab.Highlights }, onProjects = { tab = StudioTab.Projects },
+                            onHighlight = ::editHighlight)
                         StudioTab.Import -> {
+                            StudioPageTitle("Import footage", "Open a local recording or pick parts from a YouTube replay.")
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text("From your phone", style = MaterialTheme.typography.titleMedium)
@@ -484,44 +496,40 @@ class MainActivity : ComponentActivity() {
                                 OutlinedButton(onClick = { tab = StudioTab.Editor }) { Text("Open editor") }
                             }
                         }
-                        StudioTab.Highlights -> if (project == null) {
-                            Text("Import a recording to find highlights.")
-                            Button(onClick = { tab = StudioTab.Import }) { Text("Import video") }
-                        } else {
-                            Text("Highlight focus", style = MaterialTheme.typography.titleSmall)
-                            HighlightMode.entries.chunked(2).forEach { row ->
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    row.forEach { mode ->
-                                        FilterChip(selected = project.mode == mode, enabled = Work.ANALYZE !in state.jobs,
-                                            onClick = {
-                                                StudioSession.setMode(this@MainActivity, mode)
-                                                showNotificationPermission()
-                                            }, label = { Text(mode.label) })
-                                    }
-                                }
-                            }
-                            if (availableParts.any { it.highlights == null } && Work.ANALYZE !in state.jobs) {
-                                OutlinedButton(onClick = { StudioSession.analyze(this@MainActivity) }) { Text("Find highlights") }
-                            }
-                            if (suggestions.isNotEmpty()) {
-                                Text("Suggested highlights", style = MaterialTheme.typography.titleLarge)
-                                suggestions.forEach { (part, highlight) ->
-                                    Card(onClick = {
-                                        selectedPart = part.uri.toString()
-                                        createDraft(part, highlight.startMs, highlight.endMs)
-                                        tab = StudioTab.Editor
-                                    }, enabled = !exporting) {
-                                        Column(Modifier.fillMaxWidth().padding(12.dp),
-                                            verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                            Text("${timestamp(part.offsetMs + highlight.startMs)} – ${timestamp(part.offsetMs + highlight.endMs)}",
-                                                style = MaterialTheme.typography.titleSmall)
-                                            Text(highlight.reason, color = MaterialTheme.colorScheme.secondary)
+                        StudioTab.Highlights -> {
+                            StudioPageTitle("Highlights", "Whisper finds spoken moments. Motion and audio cues help find other clips.")
+                            if (project == null || availableParts.isEmpty()) {
+                                Text("Import or download a recording to find highlights.")
+                                Button(onClick = { tab = StudioTab.Import }) { Text("Open import") }
+                            } else {
+                                Text("Highlight focus", style = MaterialTheme.typography.titleSmall)
+                                HighlightMode.entries.chunked(2).forEach { row ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        row.forEach { mode ->
+                                            FilterChip(selected = project.mode == mode, enabled = Work.ANALYZE !in state.jobs,
+                                                onClick = {
+                                                    StudioSession.setMode(this@MainActivity, mode)
+                                                    showNotificationPermission()
+                                                }, label = { Text(mode.label) })
                                         }
                                     }
                                 }
-                            } else if (availableParts.isNotEmpty() && availableParts.all { it.highlights != null }) {
-                                Text("No strong highlight signals found. You can still trim a section manually.")
-                                TextButton(onClick = { tab = StudioTab.Editor }) { Text("Open editor") }
+                                val pending = availableParts.any { !it.part.joined && !it.speechAnalyzed }
+                                if (pending && Work.ANALYZE !in state.jobs) {
+                                    Button(onClick = {
+                                        StudioSession.analyze(this@MainActivity)
+                                        showNotificationPermission()
+                                    }) { Text(if (suggestions.isEmpty()) "Find highlights" else "Refresh with Whisper") }
+                                }
+                                if (suggestions.isNotEmpty()) {
+                                    Text("Suggested clips", style = MaterialTheme.typography.titleLarge)
+                                    suggestions.forEach { (part, highlight) ->
+                                        StudioHighlightCard(part, highlight, !exporting) { editHighlight(part, highlight) }
+                                    }
+                                } else if (!pending) {
+                                    Text("No strong moments found. You can still trim a clip manually.")
+                                    TextButton(onClick = { tab = StudioTab.Editor }) { Text("Open editor") }
+                                }
                             }
                         }
                         StudioTab.Editor -> if (project == null || selected == null) {
@@ -614,8 +622,8 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         StudioTab.Projects -> {
-                            Text("Projects", style = MaterialTheme.typography.titleLarge)
-                            var savedProjectsOpen by rememberSaveable { mutableStateOf(false) }
+                            StudioPageTitle("Projects", "Reopen a recording or manage its exports and storage.")
+                            var savedProjectsOpen by rememberSaveable { mutableStateOf(true) }
                             SettingsDisclosure("Saved projects · ${state.library.projects.size}", savedProjectsOpen,
                                 { savedProjectsOpen = !savedProjectsOpen }) {
                                 if (state.library.projects.isEmpty()) Text("Imported recordings will appear here.")

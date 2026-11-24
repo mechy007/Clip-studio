@@ -10,7 +10,8 @@ import java.io.FileNotFoundException
 import java.util.UUID
 
 internal data class PartReview(
-    val part: SourcePart, val highlights: List<Highlight>? = null, val released: Boolean = false
+    val part: SourcePart, val highlights: List<Highlight>? = null, val released: Boolean = false,
+    val speechAnalyzed: Boolean = false
 )
 internal data class StudioProject(
     val name: String, val layout: Layout, val parts: List<PartReview>, val queue: List<ExportClip> = emptyList(),
@@ -104,10 +105,11 @@ internal class StudioProjectStore(context: Context) {
             val highlights = row.optJSONArray("highlights")?.let { items ->
                 (0 until items.length()).map { position ->
                     val item = items.getJSONObject(position)
-                    Highlight(item.getLong("start"), item.getLong("end"), item.getInt("score"), item.getString("reason"))
+                    Highlight(item.getLong("start"), item.getLong("end"), item.getInt("score"), item.getString("reason"),
+                        item.optString("speech", "").takeIf(String::isNotBlank))
                 }
             }
-            PartReview(part, if (released) null else highlights, released)
+            PartReview(part, if (released) null else highlights, released, row.optBoolean("speechAnalyzed"))
         }
         val sources = parts.filterNot { it.released }.associateBy { it.part.uri.toString() }
         val queue = root.optJSONArray("queue")?.let { items ->
@@ -213,11 +215,11 @@ internal class StudioProjectStore(context: Context) {
             val row = JSONObject().put("uri", part.uri.toString()).put("offset", part.offsetMs)
                 .put("duration", part.durationMs).put("next", part.nextOffsetMs)
                 .put("format", part.formatId.orEmpty()).put("joined", part.joined).put("released", review.released)
-                .put("downloadHeight", part.downloadQuality?.maxHeight)
+                .put("downloadHeight", part.downloadQuality?.maxHeight).put("speechAnalyzed", review.speechAnalyzed)
             review.highlights?.let { highlights ->
                 val items = JSONArray()
                 highlights.forEach { items.put(JSONObject().put("start", it.startMs).put("end", it.endMs)
-                    .put("score", it.score).put("reason", it.reason)) }
+                    .put("score", it.score).put("reason", it.reason).put("speech", it.speechExcerpt)) }
                 row.put("highlights", items)
             }
             rows.put(row)
