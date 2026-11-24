@@ -208,9 +208,14 @@ internal object StudioMedia {
         val id = YouTubeLinkClassifier.parseVideoId(link)
         val media = runInterruptible {
             YouTubeVideoImporter.prepare(context)
-            val format = if (audioOnly) "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]" else previousFormat?.also {
+            val format = if (audioOnly) {
+                "ba[protocol=https][acodec^=mp4a]/ba[protocol=https]"
+            } else previousFormat?.also {
                 check(it.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) { "Saved video format is unavailable." }
-            } ?: recordingFormatSelector(height)
+            } ?: if (indexedDash) {
+                // DASH fragment formats use http_dash_segments rather than the direct HTTPS protocol.
+                recordingFormatSelector(height).replace("[protocol=https]", "")
+            } else recordingFormatSelector(height)
             val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$id")
                 .addOption("--no-playlist")
                 .addOption("--no-warnings")
