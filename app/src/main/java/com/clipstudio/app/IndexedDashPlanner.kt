@@ -49,8 +49,7 @@ internal object IndexedDashPlanner {
             val rawUrl = fragment.optString("url").takeIf(String::isNotBlank)
                 ?: fragment.optString("path").takeIf(String::isNotBlank)
                 ?: return null
-            val resolved = runCatching { URI(base).resolve(rawUrl).toString() }.getOrNull()
-                ?: return null
+            val resolved = resolveUrl(base, rawUrl) ?: return null
             val uri = runCatching { URI(resolved) }.getOrNull() ?: return null
             if (uri.scheme != "https" || uri.host.isNullOrBlank()) return null
 
@@ -74,6 +73,20 @@ internal object IndexedDashPlanner {
             json.keys().asSequence().associateWith { json.optString(it) }.filterValues(String::isNotBlank)
         }.orEmpty()
         return IndexedDashTrack(formatId, parsed, headers)
+    }
+
+    private fun resolveUrl(base: String, fragment: String): String? {
+        return runCatching {
+            val baseUri = URI(base)
+            val fragmentUri = URI(fragment)
+            val resolved = if (fragmentUri.isAbsolute) fragmentUri else baseUri.resolve(fragmentUri)
+            // DASH BaseURL query parameters can carry signed CDN authorization. Preserve
+            // them when a relative segment path does not provide its own query.
+            val withBaseQuery = if (resolved.rawQuery == null && baseUri.rawQuery != null) {
+                URI(resolved.scheme, resolved.rawAuthority, resolved.rawPath, baseUri.rawQuery, resolved.rawFragment)
+            } else resolved
+            withBaseQuery.toString()
+        }.getOrNull()
     }
 
     fun parseSelectedFormats(media: JSONObject): List<IndexedDashTrack>? {
