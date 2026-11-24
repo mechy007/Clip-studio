@@ -86,6 +86,9 @@ object YouTubeVideoImporter {
                     YoutubeDL.execute(request, id, false) { progress, _, _ ->
                         if (progress >= 0) onProgress(progress.toInt().coerceIn(0, 99))
                     }
+                } catch (cancelled: CancellationException) {
+                    runCatching { YoutubeDL.destroyProcessById(id) }
+                    throw cancelled
                 } catch (error: YoutubeDLException) {
                     val detail = error.message.orEmpty()
                     if (YouTubeDownloadValidation.isForbidden(detail)) {
