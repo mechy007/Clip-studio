@@ -4,6 +4,8 @@ import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 internal enum class DownloadQuality(val maxHeight: Int, val videoKbps: Int) {
     LOW(360, 900), MEDIUM(480, 1_400), HIGH(720, 2_600), FULL_HD(1080, 4_500), QHD(1440, 8_000);
@@ -83,8 +85,48 @@ internal data class GuidedDownloadPlan(
 )
 
 internal fun savedRecordingRange(start: Long, recordingEnd: Long, savedEnd: Long?, requestedEnd: Long?): RecordingPartWindow? {
+    if (start < 0 || recordingEnd <= start) return null
     val end = minOf(recordingEnd, savedEnd ?: recordingEnd, requestedEnd ?: recordingEnd)
     return if (end > start) nextRecordingPart(start, end) else null
+}
+
+internal fun parseRecordingDurationMs(
+    durationSeconds: Double?, durationText: String?, formatDurations: List<Double?> = emptyList()
+): Long? {
+    fun toMillis(seconds: Double?): Long? {
+        if (seconds == null || !seconds.isFinite() || seconds <= 0.0) return null
+        return runCatching {
+            BigDecimal.valueOf(seconds).multiply(BigDecimal.valueOf(1000))
+                .setScale(0, RoundingMode.HALF_UP).longValueExact()
+        }.getOrNull()?.takeIf { it > 0L }
+    }
+    toMillis(durationSeconds)?.let { return it }
+    formatDurations.firstNotNullOfOrNull(::toMillis)?.let { return it }
+
+    val fields = durationText?.trim()?.takeIf { it.isNotEmpty() }?.split(':') ?: return null
+    if (fields.size !in 1..3) return null
+    val whole = fields.dropLast(1).map { it.toLongOrNull()?.takeIf { value -> value >= 0 } ?: return null }
+    val last = runCatching { BigDecimal(fields.last()) }.getOrNull() ?: return null
+    if (last.signum() < 0 || (fields.size > 1 && last >= BigDecimal.valueOf(60))) return null
+    if (fields.size == 3 && whole[1] >= 60) return null
+    val totalSeconds = when (fields.size) {
+        1 -> last
+        2 -> BigDecimal.valueOf(whole[0]).multiply(BigDecimal.valueOf(60)).add(last)
+        else -> BigDecimal.valueOf(whole[0]).multiply(BigDecimal.valueOf(3600))
+            .add(BigDecimal.valueOf(whole[1]).multiply(BigDecimal.valueOf(60))).add(last)
+    }
+    return runCatching {
+        totalSeconds.multiply(BigDecimal.valueOf(1000)).setScale(0, RoundingMode.HALF_UP).longValueExact()
+    }.getOrNull()?.takeIf { it > 0L }
+}
+
+internal fun validatedGuidedDownloadPlan(
+    start: Long, recordingEnd: Long, partEnd: Long, format: String, requestedEnd: Long? = null
+): GuidedDownloadPlan? {
+    if (start < 0 || recordingEnd <= start || partEnd <= start ||
+        !format.matches(Regex("[A-Za-z0-9_-]+(\\+[A-Za-z0-9_-]+)?"))) return null
+    val range = savedRecordingRange(start, recordingEnd, partEnd, requestedEnd) ?: return null
+    return GuidedDownloadPlan(range, recordingEnd, format)
 }
 
 internal class GuidedDownloadFiles(val directory: File) {
@@ -100,11 +142,17 @@ internal class GuidedDownloadFiles(val directory: File) {
             JSONObject(String(settings.readFully(), Charsets.UTF_8))
         } catch (_: FileNotFoundException) {
             return null
+        } catch (_: Exception) {
+            settings.delete()
+            return null
         }
-        val duration = data.getLong("recordingEnd")
-        val end = data.optLong("partEnd", duration)
-        val range = savedRecordingRange(start, duration, end, requestedEnd) ?: return null
-        return GuidedDownloadPlan(range, duration, data.getString("format"))
+        val plan = runCatching {
+            val duration = data.getLong("recordingEnd")
+            validatedGuidedDownloadPlan(start, duration, data.optLong("partEnd", duration),
+                data.getString("format"), requestedEnd)
+        }.getOrNull()
+        if (plan == null) settings.delete()
+        return plan
     }
 
     fun save(plan: GuidedDownloadPlan) {
