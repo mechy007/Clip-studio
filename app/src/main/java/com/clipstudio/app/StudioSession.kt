@@ -36,6 +36,8 @@ internal data class StudioState(
     val joinRevision: Long = 0,
     val guidedPart: SourcePart? = null,
     val guidedDownload: GuidedDownloadProgress? = null,
+    val activeDownloadQueueId: String? = null,
+    val libraryLoaded: Boolean = false,
     val guidedExportRevision: Int = 0,
     val storageWarning: String? = null,
     val playback: Pair<ExportClip, Uri>? = null,
@@ -87,20 +89,20 @@ internal object StudioSession {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                update { it.copy(storageWarning = "Saved projects could not be opened. Existing files were kept. Reopen Clip Studio to retry.") }
+                update { it.copy(libraryLoaded = true, storageWarning = "Saved projects could not be opened. Existing files were kept. Reopen Clip Studio to retry.") }
                 return@launch
             }
             update { it.copy(persistedDrafts = recovered.projects.associate { project -> project.id to project.drafts }) }
             val ongoing = state.value
             if (ongoing.project == null) {
                 val project = recovered.projects.firstOrNull { it.id == recovered.currentId } ?: recovered.projects.firstOrNull()
-                update { it.copy(project = project, library = recovered, exports = project?.exports.orEmpty()) }
+                update { it.copy(project = project, library = recovered, exports = project?.exports.orEmpty(), libraryLoaded = true) }
             } else {
                 val merged = ongoing.library.copy(
                     projects = (ongoing.library.projects + recovered.projects).distinctBy { it.id },
                     presets = (ongoing.library.presets + recovered.presets).distinctBy { it.name }
                 )
-                update { it.copy(library = merged) }
+                update { it.copy(library = merged, libraryLoaded = true) }
                 saves.trySend(merged)
             }
             for (library in saves) {
@@ -180,6 +182,8 @@ internal object StudioSession {
     }
 
     fun downloadScannedQueue(context: Context) = work(context, Work.IMPORT, "Preparing download queue") { app ->
+        val queueProject = state.value.project?.takeIf { it.downloadQueue.isNotEmpty() } ?: return@work
+        update { it.copy(activeDownloadQueueId = queueProject.id) }
         var openedEditor = false
         while (true) {
             currentCoroutineContext().ensureActive()
@@ -571,6 +575,15 @@ internal object StudioSession {
         jobs.values.toList().forEach { it.cancel() }
     }
 
+    fun stopBackgroundWork(message: String) {
+        val running = jobs.values.toList()
+        cancelAll()
+        scope.launch {
+            running.forEach { it.join() }
+            if (jobs.isEmpty()) status(message)
+        }
+    }
+
     private fun addPart(app: Context, part: SourcePart, download: RecordingDownload? = null) {
         val project = state.value.project ?: return
         val previous = project.parts.indexOfFirst { it.released && !it.part.joined && it.part.offsetMs == part.offsetMs && it.part.downloadQuality == part.downloadQuality }
@@ -680,7 +693,7 @@ internal object StudioSession {
                 }
                 update {
                     if (key == Work.EXPORT) it.copy(jobs = it.jobs - key, exportingClip = null, queueExportActive = false, finishingPart = false)
-                    else if (key == Work.IMPORT) it.copy(jobs = it.jobs - key, guidedDownload = null)
+                    else if (key == Work.IMPORT) it.copy(jobs = it.jobs - key, guidedDownload = null, activeDownloadQueueId = null)
                     else it.copy(jobs = it.jobs - key)
                 }
             }

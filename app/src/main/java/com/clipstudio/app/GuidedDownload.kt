@@ -31,6 +31,32 @@ internal fun recordingFormatSelector(height: Int): String {
 
 internal const val DOWNLOAD_CHUNK_MS = 120_000L
 
+internal const val DOWNLOAD_DISK_RESERVE_BYTES = 24L * 1024 * 1024
+
+internal data class DownloadEstimate(val transferBytes: Long, val peakStorageBytes: Long)
+
+internal fun downloadOutputBytes(durationMs: Long, videoKbps: Int): Long =
+    durationMs.coerceAtLeast(0) * (videoKbps + 128L) / 8
+
+internal fun downloadStagingBytes(durationMs: Long, videoKbps: Int): Long =
+    downloadOutputBytes(durationMs, videoKbps) * 112 / 100
+
+internal fun estimateRecordingDownload(durationMs: Long, quality: DownloadQuality): DownloadEstimate {
+    val transfer = downloadOutputBytes(durationMs, quality.videoKbps)
+    val staged = downloadStagingBytes(durationMs, quality.videoKbps)
+    return DownloadEstimate(transfer, staged * 2 + DOWNLOAD_DISK_RESERVE_BYTES)
+}
+
+internal fun estimateDownloadQueue(estimates: Iterable<DownloadEstimate>): DownloadEstimate {
+    var retained = 0L
+    var peak = 0L
+    for (estimate in estimates) {
+        peak = maxOf(peak, retained + estimate.peakStorageBytes)
+        retained += estimate.transferBytes
+    }
+    return DownloadEstimate(retained, peak)
+}
+
 internal fun RecordingPartWindow.downloadChunks(): List<RecordingPartWindow> =
     generateSequence(startMs) { start ->
         (start + minOf(DOWNLOAD_CHUNK_MS, endMs - start)).takeIf { it < endMs }

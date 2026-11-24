@@ -398,7 +398,7 @@ internal object StudioMedia {
                     }
                     check(streams.endMs >= range.endMs) { "The recording is now shorter than this part. Saved pieces were kept." }
                     files.staging.delete()
-                    val chunkBytes = chunk.lengthMs * (videoKbps + 128L) * 112 / 800
+                    val chunkBytes = downloadStagingBytes(chunk.lengthMs, videoKbps)
                     checkDownloadSpace(directory, chunkBytes * if (useSectionDownloader) 2 else 1)
                     val beforeChunk = processed
                     val report: (Long) -> Unit = { time ->
@@ -450,7 +450,7 @@ internal object StudioMedia {
 
     private fun checkDownloadSpace(directory: File, outputBytes: Long) {
         val freeBytes = directory.usableSpace
-        val required = outputBytes + 24L * 1024 * 1024
+        val required = outputBytes + DOWNLOAD_DISK_RESERVE_BYTES
         check(freeBytes >= required) {
             "Free up at least ${(required - freeBytes + 1_048_575) / 1_048_576} MB to continue. Saved pieces were kept."
         }
