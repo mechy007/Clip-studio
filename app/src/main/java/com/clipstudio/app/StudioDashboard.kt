@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -164,18 +165,34 @@ internal fun StudioOverview(
         DashboardCounter(Modifier.weight(1f), "Parts", project?.availableParts?.count { !it.part.joined } ?: 0,
             R.drawable.nav_import, onImport)
     }
-    Text("One-tap recipes", style = MaterialTheme.typography.titleLarge)
-    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        StudioRecipe.entries.forEach { recipe ->
-            Card(onClick = { onRecipe(recipe) }, enabled = source != null && editEnabled, modifier = Modifier.width(172.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(painterResource(R.drawable.nav_editor), null, tint = MaterialTheme.colorScheme.secondary)
-                    Text(recipe.title, style = MaterialTheme.typography.titleMedium)
-                    Text(recipe.detail, style = MaterialTheme.typography.bodySmall)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DashboardQuickAction(Modifier.weight(1f), "Import", "YouTube or local", R.drawable.nav_import, onImport)
+        DashboardQuickAction(Modifier.weight(1f), "Find moments", "Offline AI scan", R.drawable.nav_highlights, onHighlights)
+        DashboardQuickAction(Modifier.weight(1f), "Edit clip", "Trim and captions", R.drawable.nav_editor, onEdit)
+    }
+    Text("One-tap AI recipes", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+    StudioRecipe.entries.chunked(2).forEach { recipes ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            recipes.forEach { recipe ->
+                Card(onClick = { onRecipe(recipe) }, enabled = source != null && editEnabled,
+                    modifier = Modifier.weight(1f).heightIn(min = 126.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            Icon(painterResource(R.drawable.nav_editor), null, tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(19.dp))
+                            Text(recipe.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                        Text(recipe.detail, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if (source == null) "Import footage to use" else "Apply recipe",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
+            if (recipes.size == 1) Spacer(Modifier.weight(1f))
         }
     }
     Card(
@@ -242,6 +259,32 @@ internal fun StudioHighlightCard(part: SourcePart, highlight: Highlight, enabled
                 overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             Text("${timestamp(part.offsetMs + highlight.startMs)} – ${timestamp(part.offsetMs + highlight.endMs)}",
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+
+@Composable
+private fun DashboardQuickAction(
+    modifier: Modifier,
+    title: String,
+    detail: String,
+    icon: Int,
+    onClick: () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(painterResource(icon), null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            Text(detail, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2,
+                overflow = TextOverflow.Ellipsis)
         }
     }
 }

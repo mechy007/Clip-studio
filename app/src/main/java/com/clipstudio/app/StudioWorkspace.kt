@@ -95,41 +95,54 @@ internal fun StudioWorkspace(
 
         Text("Available workflows", style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold)
-        WorkspaceFeatureCard(
-            "AI highlight discovery",
-            "Offline Whisper transcripts, YAMNet reaction sounds, audio-energy and visual-motion signals.",
-            "Open Highlights", R.drawable.nav_highlights, onHighlights
-        )
-        WorkspaceFeatureCard(
-            "Long-form and resumable import",
-            "30-minute sections, ranked part scanning, quality selection, download queues and resume support.",
-            "Open Import", R.drawable.nav_import, onImport
-        )
-        WorkspaceFeatureCard(
-            "Precision editor and caption studio",
-            "Waveform scrubbing, frame stepping, bookmarks, crop controls, timed captions and SRT export.",
-            "Open Editor", R.drawable.nav_editor, onEditor
-        )
-        WorkspaceFeatureCard(
-            "Facecam rescue and tracking",
-            "Automatic facecam correction, tracked crop paths, enhancement previews and manual framing.",
-            "Open Editor", R.drawable.nav_editor, onEditor
-        )
-        WorkspaceFeatureCard(
-            "Audio finishing and creator presets",
-            "Voice normalization, fades, independent track levels, audio mixing and reusable creator presets.",
-            "Open Editor", R.drawable.nav_editor, onEditor
-        )
-        WorkspaceFeatureCard(
-            "Fast export and render diagnostics",
-            "Hardware H.264 when supported, software fallback, quick trim, preview export and per-stage timings.",
-            "Open Projects", R.drawable.nav_projects, onProjects
-        )
-        WorkspaceFeatureCard(
-            "Project library and storage",
-            "Multiple saved projects and drafts, queued clips, export history and safe removal of completed source footage.",
-            "Open Projects", R.drawable.nav_projects, onProjects
-        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            WorkspaceFeatureCard(
+                "AI highlight discovery",
+                "Whisper transcripts, reaction sounds, audio energy and visual-motion cues.",
+                "Open Highlights", R.drawable.nav_highlights, onHighlights, Modifier.weight(1f)
+            )
+            WorkspaceFeatureCard(
+                "Long-form import",
+                "30-minute parts, ranked scanning, quality choices and resumable queues.",
+                "Open Import", R.drawable.nav_import, onImport, Modifier.weight(1f)
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            WorkspaceFeatureCard(
+                "Precision editor",
+                "Waveform scrubbing, frame stepping, bookmarks, trim and framing.",
+                "Open Editor", R.drawable.nav_editor, onEditor, Modifier.weight(1f)
+            )
+            WorkspaceFeatureCard(
+                "Captions & SRT",
+                "Offline speech-to-text, timed caption editing, styles and subtitle export.",
+                "Open Editor", R.drawable.nav_editor, onEditor, Modifier.weight(1f)
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            WorkspaceFeatureCard(
+                "Facecam tools",
+                "Tracking, crop rescue, enhancement previews and manual positioning.",
+                "Open Editor", R.drawable.nav_editor, onEditor, Modifier.weight(1f)
+            )
+            WorkspaceFeatureCard(
+                "Audio finishing",
+                "Noise cleanup, normalization, fades, track levels and mixing.",
+                "Open Editor", R.drawable.nav_editor, onEditor, Modifier.weight(1f)
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            WorkspaceFeatureCard(
+                "Fast export",
+                "Hardware H.264 when available, software fallback and render timings.",
+                "Open Projects", R.drawable.nav_projects, onProjects, Modifier.weight(1f)
+            )
+            WorkspaceFeatureCard(
+                "Project library",
+                "Drafts, export queue, project history and storage management.",
+                "Open Projects", R.drawable.nav_projects, onProjects, Modifier.weight(1f)
+            )
+        }
 
         Text("Future feature slots", style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold)
@@ -139,12 +152,20 @@ internal fun StudioWorkspace(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         WorkspaceRoadmapCard(
+            "Cover-frame export",
+            "Generate and save a branded Shorts thumbnail from the selected video frame."
+        )
+        WorkspaceRoadmapCard(
             "Custom subtitle font packs",
             "Import and manage creator-owned TTF/OTF fonts for caption styling."
         )
         WorkspaceRoadmapCard(
             "Encrypted cross-device project sync",
             "Synchronize project metadata, editable drafts and creator presets across Android devices."
+        )
+        WorkspaceRoadmapCard(
+            "Multi-track timeline",
+            "Arrange video, voice, game audio, overlays and captions on independent tracks."
         )
         WorkspaceRoadmapCard(
             "Expanded color grading",
@@ -203,22 +224,22 @@ private fun WorkspaceFeatureCard(
     detail: String,
     action: String,
     icon: Int,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Card(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier,
         shape = RoundedCornerShape(20.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(15.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        Column(
+            Modifier.fillMaxWidth().padding(13.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Box(
-                Modifier.size(42.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(14.dp)),
+                Modifier.size(38.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(13.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 androidx.compose.material3.Icon(
@@ -226,13 +247,12 @@ private fun WorkspaceFeatureCard(
                     tint = MaterialTheme.colorScheme.primary
                 )
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                Text(detail, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(action, style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-            }
+            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
+                minLines = 2)
+            Text(detail, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, minLines = 3)
+            Text(action, style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
     }
 }
