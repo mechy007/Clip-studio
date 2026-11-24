@@ -103,6 +103,18 @@ class ImportedWorkflowTest {
         assertEquals(listOf(short), recordingSampleRanges(short))
     }
 
+    @Test fun queueEstimateAccountsForRetainedOutputAndTemporaryAssembly() {
+        val first = estimateRecordingDownload(600_000L, DownloadQuality.LOW)
+        val second = estimateRecordingDownload(600_000L, DownloadQuality.QHD)
+        assertEquals(77_100_000L, first.transferBytes)
+        assertTrue(second.transferBytes > first.transferBytes)
+        assertTrue(second.peakStorageBytes > second.transferBytes * 2)
+        val estimate = estimateDownloadQueue(listOf(first, second))
+        assertEquals(first.transferBytes + second.transferBytes, estimate.transferBytes)
+        assertEquals(first.transferBytes + second.peakStorageBytes, estimate.peakStorageBytes)
+        assertEquals(DownloadEstimate(0, 0), estimateDownloadQueue(emptyList()))
+    }
+
     @Test fun qualityCapsEveryFallbackFormatAndAllowsMultipleCopiesOfTheSamePart() {
         val start = 30 * 60_000L
         val medium = RecordingDownload(start, DownloadQuality.MEDIUM)

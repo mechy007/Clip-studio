@@ -59,6 +59,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -93,9 +94,23 @@ private enum class StudioTab(val title: String, val icon: Int) {
 }
 
 class MainActivity : ComponentActivity() {
+    private var resumeQueueProject by mutableStateOf<String?>(null)
+
+    private fun handleQueueIntent(intent: Intent?) {
+        if (intent?.action != StudioWorkService.RESUME_DOWNLOADS) return
+        resumeQueueProject = intent.getStringExtra(StudioWorkService.PROJECT_ID)
+        intent.removeExtra(StudioWorkService.PROJECT_ID)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleQueueIntent(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         StudioSession.initialize(this)
+        handleQueueIntent(intent)
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = StudioColors) { Dashboard() }
@@ -138,6 +153,21 @@ class MainActivity : ComponentActivity() {
                 notificationAsked = true
                 permission.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
+        }
+        LaunchedEffect(resumeQueueProject, state.libraryLoaded, state.jobs.keys) {
+            val projectId = resumeQueueProject ?: return@LaunchedEffect
+            if (!state.libraryLoaded) return@LaunchedEffect
+            val target = state.library.projects.firstOrNull { it.id == projectId && it.downloadQueue.isNotEmpty() }
+            if (target == null) {
+                resumeQueueProject = null
+                return@LaunchedEffect
+            }
+            if (state.project?.id != target.id && state.jobs.isNotEmpty()) return@LaunchedEffect
+            if (Work.IMPORT in state.jobs) return@LaunchedEffect
+            resumeQueueProject = null
+            if (state.project?.id != target.id) StudioSession.openProject(target.id)
+            tab = StudioTab.Import
+            StudioSession.downloadScannedQueue(this@MainActivity)
         }
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
@@ -421,8 +451,17 @@ class MainActivity : ComponentActivity() {
                                     }
                                     Text("Download resolution can be lower when the source lacks the selected quality.",
                                         style = MaterialTheme.typography.bodySmall)
+                                    val freeBytes by produceState<Long?>(null, project.id, occupied) {
+                                        value = withContext(Dispatchers.IO) { filesDir.usableSpace.takeIf { it > 0L } }
+                                    }
                                     if (project.downloadQueue.isNotEmpty()) {
                                         Text("Download queue", style = MaterialTheme.typography.titleMedium)
+                                        val ranges = scannedParts.associateBy { it.range.startMs }
+                                        val estimate = estimateDownloadQueue(project.downloadQueue.mapNotNull { item ->
+                                            ranges[item.startMs]?.let { estimateRecordingDownload(it.range.lengthMs, item.quality) }
+                                        })
+                                        DownloadEstimateText(estimate, freeBytes)
+
                                         project.downloadQueue.forEach { item ->
                                             val number = scannedParts.indexOfFirst { it.range.startMs == item.startMs } + 1
                                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -451,6 +490,12 @@ class MainActivity : ComponentActivity() {
                                                 Text("Part ${index + 1} · ${timestamp(range.startMs)}–${timestamp(range.endMs)}")
                                                 Text(result.score?.let { "Audio activity $it/100 · ${result.samples} samples" }
                                                     ?: "Audio ranking unavailable", style = MaterialTheme.typography.bodySmall)
+                                                if (saved == null || saved.released) {
+                                                    val estimate = estimateRecordingDownload(range.lengthMs, quality)
+                                                    val data = Formatter.formatShortFileSize(this@MainActivity, estimate.transferBytes)
+                                                    val peak = Formatter.formatShortFileSize(this@MainActivity, estimate.peakStorageBytes)
+                                                    Text("About $data data · $peak peak space", style = MaterialTheme.typography.labelSmall)
+                                                }
                                             }
                                             when {
                                                 queued -> Text("Queued", style = MaterialTheme.typography.labelSmall)
@@ -740,6 +785,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    @Composable
+    private fun DownloadEstimateText(estimate: DownloadEstimate, freeBytes: Long?) {
+        val transfer = Formatter.formatShortFileSize(this, estimate.transferBytes)
+        val peak = Formatter.formatShortFileSize(this, estimate.peakStorageBytes)
+        Text("Estimated data · $transfer")
+        Text("Peak free space estimate · $peak", style = MaterialTheme.typography.bodySmall)
+        if (freeBytes != null) {
+            val available = Formatter.formatShortFileSize(this, freeBytes)
+            Text(if (freeBytes < estimate.peakStorageBytes) "$available free. The queue may need more space."
+                else "$available free now.", style = MaterialTheme.typography.bodySmall,
+                color = if (freeBytes < estimate.peakStorageBytes) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text("Based on duration and selected quality. Source bitrate and saved pieces affect the total.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 
     private fun displayName(uri: Uri): String = runCatching {
