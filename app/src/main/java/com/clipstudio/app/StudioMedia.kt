@@ -659,13 +659,18 @@ internal object StudioMedia {
                 val seek = if (seekOffset == 0L) emptyList() else listOf("-ss", seconds(seekOffset))
                 seek + listOf("-i", stream.url)
             }
+            val copyBoundaryAligned = tracks.indices.all { index ->
+                val selected = tracks[index].mediaFor(range.startMs, range.endMs)
+                selected.isNotEmpty() && selected.first().startMs == range.startMs &&
+                    selected.last().endMs == range.endMs
+            }
             val copyArguments = listOf("-nostdin", "-loglevel", "error", "-y") + inputArgs + listOf(
                 "-t", seconds(range.lengthMs),
                 "-map", "0:v:0", "-map", "${inputs.lastIndex}:a:0",
                 "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
                 staging.absolutePath
             )
-            val copied = runFfmpeg(copyArguments.toTypedArray()) &&
+            val copied = copyBoundaryAligned && runFfmpeg(copyArguments.toTypedArray()) &&
                 recordingDuration(context, staging, range.lengthMs, requireAudio = true)
                     ?.let { abs(it - range.lengthMs) <= 350L } == true
             val encoded = if (copied) true else {
