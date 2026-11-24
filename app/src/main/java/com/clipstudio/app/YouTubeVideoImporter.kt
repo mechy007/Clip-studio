@@ -2,6 +2,7 @@ package com.clipstudio.app
 
 import android.content.Context
 import android.net.Uri
+import com.yausername.aria2c.Aria2c
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -15,6 +16,7 @@ import java.util.UUID
 
 object YouTubeVideoImporter {
     @Volatile private var initialized = false
+    @Volatile private var aria2Available = false
 
     @Synchronized
     internal fun prepare(context: Context) {
@@ -22,6 +24,12 @@ object YouTubeVideoImporter {
         val app = context.applicationContext
         YoutubeDL.init(app)
         FFmpeg.init(app)
+        aria2Available = runCatching {
+            Aria2c.init(app)
+            File(app.applicationInfo.nativeLibraryDir, "libaria2c.zip.so").isFile
+        }.onFailure {
+            android.util.Log.w("ClipStudioYouTube", "Aria2c unavailable; using the native downloader", it)
+        }.getOrDefault(false)
         try {
             YoutubeDL.updateYoutubeDL(app, YoutubeDL.UpdateChannel._STABLE)
         } catch (error: Exception) {
@@ -84,33 +92,92 @@ object YouTubeVideoImporter {
             check(staging.mkdirs()) { "Could not create the download directory." }
             try {
                 prepare(context)
-                val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
-                    .addOption("--no-playlist")
-                    .addOption("--match-filter", "!is_live & !is_upcoming")
-                    .addOption("--socket-timeout", 30)
-                    // Parallel fragment fetching avoids serial DASH/HLS downloads.
-                    // Four workers are a conservative default for Android/mobile networks.
-                    .addOption("--concurrent-fragments", 4)
-                    .addOption("--buffer-size", "64K")
-                    .addOption("--retries", 3)
-                    .addOption("--fragment-retries", 8)
-                    .addOption("-f", "bv*[height<=$height]+ba/b[height<=$height]/best")
-                    .addOption("--merge-output-format", "mp4")
-                    .addOption("-o", File(staging, "video.%(ext)s").absolutePath)
-                try {
-                    YoutubeDL.execute(request, id, false) { progress, _, _ ->
-                        if (progress >= 0) onProgress(progress.toInt().coerceIn(0, 99))
+                fun request(useAria2: Boolean): YoutubeDLRequest {
+                    val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+                        .addOption("--no-playlist")
+                        .addOption("--match-filter", "!is_live & !is_upcoming")
+                        .addOption("--socket-timeout", 30)
+                        .addOption("--concurrent-fragments", 8)
+                        .addOption("--buffer-size", "64K")
+                        .addOption("--retries", 5)
+                        .addOption("--fragment-retries", 10)
+                        .addOption("-f", "bv*[height<=$height]+ba/b[height<=$height]/best")
+                        .addOption("--merge-output-format", "mp4")
+                        .addOption("-o", File(staging, "video.%(ext)s").absolutePath)
+                    if (useAria2) {
+                        request.addOption("--downloader", "libaria2c.so")
+                            .addOption(
+                                "--external-downloader-args",
+                                "aria2c:-x 8 -s 8 -k 1M --file-allocation=none --summary-interval=1"
+                            )
+                    } else {
+                        // yt-dlp's experimental HTTP range chunking is the native fallback
+                        // for servers that throttle a single long-lived response.
+                        request.addOption("--http-chunk-size", "10M")
                     }
-                } catch (error: YoutubeDLException) {
-                    val detail = error.message.orEmpty()
-                    if (YouTubeDownloadValidation.isForbidden(detail)) {
-                        throw IllegalStateException(
-                            "YouTube refused this download (HTTP 403). Try a different permitted recording, or import a local MP4. The bundled downloader may need updating.", error
+                    return request
+                }
+
+                fun executeAttempt(request: YoutubeDLRequest, processId: String) {
+                    try {
+                        YoutubeDL.execute(request, processId, false) { progress, _, _ ->
+                            if (progress >= 0) onProgress(progress.toInt().coerceIn(0, 99))
+                        }
+                    } catch (cancelled: CancellationException) {
+                        runCatching { YoutubeDL.destroyProcessById(processId) }
+                        throw cancelled
+                    }
+                }
+
+                fun clearStaging() {
+                    staging.listFiles()?.forEach { it.deleteRecursively() }
+                }
+
+                val rendered = File(staging, "video.mp4")
+                var ariaFailure: Exception? = null
+                if (aria2Available) {
+                    try {
+                        executeAttempt(request(useAria2 = true), id)
+                        if (!YouTubeDownloadValidation.isValidMp4(rendered)) {
+                            ariaFailure = IllegalStateException("Aria2c finished without a valid MP4.")
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        if (YouTubeDownloadValidation.isForbidden(error.message.orEmpty())) {
+                            throw IllegalStateException(
+                                "YouTube refused this download (HTTP 403). Try a different permitted recording, or import a local MP4. The bundled extractor may need updating.",
+                                error
+                            )
+                        }
+                        ariaFailure = error
+                    }
+                }
+
+                if (!aria2Available || ariaFailure != null) {
+                    if (ariaFailure != null) {
+                        android.util.Log.w(
+                            "ClipStudioYouTube",
+                            "Aria2c download failed; retrying with yt-dlp's native HTTP downloader",
+                            ariaFailure
                         )
                     }
-                    throw error
+                    clearStaging()
+                    val fallbackId = if (aria2Available) UUID.randomUUID().toString() else id
+                    try {
+                        executeAttempt(request(useAria2 = false), fallbackId)
+                    } catch (error: Exception) {
+                        ariaFailure?.let(error::addSuppressed)
+                        if (YouTubeDownloadValidation.isForbidden(error.message.orEmpty())) {
+                            throw IllegalStateException(
+                                "YouTube refused this download (HTTP 403). Try a different permitted recording, or import a local MP4. The bundled extractor may need updating.",
+                                error
+                            )
+                        }
+                        throw error
+                    }
                 }
-                val rendered = File(staging, "video.mp4")
+
                 check(YouTubeDownloadValidation.isValidMp4(rendered)) {
                     "Download did not produce a valid MP4. Try a lower quality or import a local video."
                 }
