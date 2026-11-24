@@ -48,8 +48,14 @@ internal object IndexedDashDownloader {
             check(media.isNotEmpty()) { "The DASH index has no media fragments for this time range." }
             listOf(track.initialization) + media
         }
+        val outputFiles = selectedByTrack.mapIndexed { trackIndex, fragments ->
+            val signature = sha256(fragments.joinToString("|") { it.url }).take(20)
+            File(directory, "indexed-track-$trackIndex-$signature.mp4")
+        }
         val work = selectedByTrack.flatMapIndexed { trackIndex, fragments ->
-            fragments.map { fragment ->
+            if (outputFiles[trackIndex].isFile && outputFiles[trackIndex].length() > 0L) {
+                emptyList()
+            } else fragments.map { fragment ->
                 val digest = sha256(fragment.url).take(20)
                 WorkItem(
                     trackIndex,
@@ -61,7 +67,8 @@ internal object IndexedDashDownloader {
         }
         val semaphore = Semaphore(parallelism)
         val completedBytes = java.util.concurrent.atomic.AtomicLong(
-            work.sumOf { item -> item.destination.takeIf { it.isFile }?.length() ?: 0L }
+            work.sumOf { item -> item.destination.takeIf { it.isFile }?.length() ?: 0L } +
+                outputFiles.sumOf { file -> file.takeIf { it.isFile }?.length() ?: 0L }
         )
         onBytesFetched(completedBytes.get())
 
@@ -83,14 +90,23 @@ internal object IndexedDashDownloader {
         }
 
         val outputs = ArrayList<File>(tracks.size)
-        for ((trackIndex, items) in work.groupBy { it.trackIndex }.toSortedMap()) {
+        val workByTrack = work.groupBy { it.trackIndex }
+        for (trackIndex in tracks.indices) {
             coroutineContext.ensureActive()
-            val output = File(directory, "indexed-track-$trackIndex.mp4")
-            val staging = File(directory, "indexed-track-$trackIndex.mp4.part")
+            val output = outputFiles[trackIndex]
+            if (output.isFile && output.length() > 0L) {
+                outputs += output
+                continue
+            }
+            val items = workByTrack[trackIndex].orEmpty().sortedBy { it.fragment.index }
+            check(items.size == selectedByTrack[trackIndex].size) {
+                "Some selected DASH fragments are missing. Retry this part to resume the download."
+            }
+            val staging = File(directory, output.name + ".part")
             staging.delete()
             try {
                 FileOutputStream(staging).buffered().use { sink ->
-                    items.sortedBy { it.fragment.index }.forEach { item ->
+                    items.forEach { item ->
                         item.destination.inputStream().buffered().use { source -> source.copyTo(sink) }
                     }
                     sink.flush()
@@ -100,6 +116,9 @@ internal object IndexedDashDownloader {
                 }
                 output.delete()
                 check(staging.renameTo(output)) { "Could not assemble the selected DASH media fragments." }
+                // The complete per-track file is now the resumable checkpoint. Free the
+                // individual segment files before assembling the next track to cap peak storage.
+                items.forEach { it.destination.delete() }
                 outputs += output
             } finally {
                 staging.delete()
