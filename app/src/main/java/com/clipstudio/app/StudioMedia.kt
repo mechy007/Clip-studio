@@ -426,6 +426,9 @@ internal object StudioMedia {
                     recording = null
                     false
                 }
+            } else {
+                // Do not pass a DASH-only format id into the non-DASH compatibility path.
+                recording = null
             }
         }
         if (publishedDuration == null && !indexedReady) {
