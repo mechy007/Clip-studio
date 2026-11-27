@@ -31,6 +31,7 @@ enum RangeChunkState: String, Codable {
     case queued
     case downloading
     case complete
+    case failed
 }
 
 struct RangeDownloadChunk: Codable, Identifiable {
@@ -40,6 +41,7 @@ struct RangeDownloadChunk: Codable, Identifiable {
     let upperBound: Int64
     var state: RangeChunkState
     var bytesWritten: Int64 = 0
+    var attempts: Int = 0
 
     var expectedBytes: Int64 { upperBound - lowerBound + 1 }
 }
@@ -80,7 +82,7 @@ struct RemoteMediaInfo {
 }
 
 @MainActor
-final class RangeDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
+final class RangeDownloadManager: NSObject, ObservableObject, @preconcurrency URLSessionDownloadDelegate {
     static let shared = RangeDownloadManager()
     static let backgroundIdentifier = "com.mechy007.clipstudio.ios.rangedownload"
 
@@ -183,6 +185,7 @@ final class RangeDownloadManager: NSObject, ObservableObject, URLSessionDownload
         for index in job.chunks.indices where job.chunks[index].state == .downloading {
             job.chunks[index].state = .queued
             job.chunks[index].bytesWritten = 0
+            job.chunks[index].attempts = 0
         }
         update(job)
         try? persist(job)
@@ -226,6 +229,7 @@ final class RangeDownloadManager: NSObject, ObservableObject, URLSessionDownload
             if let index = job.chunks.firstIndex(where: { $0.index == chunk.index }) {
                 job.chunks[index].state = .downloading
                 job.chunks[index].bytesWritten = 0
+                job.chunks[index].attempts += 1
             }
         }
         update(job)
@@ -453,6 +457,47 @@ final class RangeDownloadManager: NSObject, ObservableObject, URLSessionDownload
 
     func urlSession(
         _ session: URLSession,
+        task: URLSessionTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let parsed = task.taskDescription.flatMap(parseTaskDescription),
+              var job = job(id: parsed.jobID),
+              let chunk = job.chunks.first(where: { $0.index == parsed.chunkIndex }),
+              let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+
+        let expectedRange = "bytes \(chunk.lowerBound)-\(chunk.upperBound)/\(job.expectedBytes)"
+        let actualRange = Self.header("Content-Range", from: http)
+        let validatorMatches: Bool
+        if let entityTag = job.entityTag {
+            validatorMatches = Self.header("ETag", from: http) == entityTag
+        } else if let lastModified = job.lastModified {
+            validatorMatches = Self.header("Last-Modified", from: http) == job.lastModified
+        } else {
+            validatorMatches = false
+        }
+
+        guard http.statusCode == 206, actualRange == expectedRange, validatorMatches else {
+            job.paused = true
+            if let index = job.chunks.firstIndex(where: { $0.index == parsed.chunkIndex }) {
+                job.chunks[index].state = .failed
+                job.chunks[index].bytesWritten = 0
+            }
+            job.lastError = RangeDownloadError.invalidResponse.localizedDescription
+            update(job)
+            try? persist(job)
+            completionHandler(.cancel)
+            return
+        }
+
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession,
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
@@ -479,14 +524,23 @@ final class RangeDownloadManager: NSObject, ObservableObject, URLSessionDownload
 
         if let error {
             if !job.paused {
+                var shouldRetry = false
                 if let index = job.chunks.firstIndex(where: { $0.index == parsed.chunkIndex }),
                    job.chunks[index].state != .complete {
-                    job.chunks[index].state = .queued
+                    shouldRetry = job.chunks[index].attempts < 4
+                    job.chunks[index].state = shouldRetry ? .queued : .failed
                     job.chunks[index].bytesWritten = 0
                 }
                 job.lastError = error.localizedDescription
                 update(job)
                 try? persist(job)
+                if shouldRetry {
+                    schedule(jobID: job.id)
+                } else {
+                    job.paused = true
+                    update(job)
+                    try? persist(job)
+                }
             }
             return
         }

@@ -168,9 +168,8 @@ enum VideoEditorService {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
-        videoComposition.backgroundColor = UIColor.black.cgColor
-
         let instruction = AVMutableVideoCompositionInstruction()
+        instruction.backgroundColor = UIColor.black.cgColor
         instruction.timeRange = CMTimeRange(start: .zero, duration: selectedRange.duration)
 
         let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: destinationVideo)

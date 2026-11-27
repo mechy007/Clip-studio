@@ -37,7 +37,7 @@ enum HLSReplayError: LocalizedError {
 /// Native HLS offline downloader. AVAssetDownloadURLSession is for supported
 /// downloadable HLS assets; it is not a way to save a live stream while it is live.
 @MainActor
-final class HLSReplayDownloader: NSObject, ObservableObject, AVAssetDownloadDelegate {
+final class HLSReplayDownloader: NSObject, ObservableObject, @preconcurrency AVAssetDownloadDelegate {
     static let shared = HLSReplayDownloader()
     static let backgroundIdentifier = "com.mechy007.clipstudio.ios.hlsreplays"
 
