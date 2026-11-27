@@ -43,7 +43,7 @@ The transfer uses three concurrent 32 MiB chunks. Each range has an If-Range val
 The current implementation intentionally fails closed when the server does not meet these requirements. It does not claim to progressively decode arbitrary MP4 byte ranges; the current progressive behavior is download/checkpointing, followed by editing after final reassembly. Parsing incomplete MP4 fragments or editing ready ranges while later ranges are still downloading is a future phase.
 
 ### HLS VOD
-AVAssetDownloadURLSession manages supported HLS offline asset packages and reports loaded time ranges. Completed replay packages are retained with a `.movpkg` extension and can be imported into the editor. An active livestream is not treated as an offline-downloadable replay. Wait for the source provider to publish a finished VOD playlist.
+AVAssetDownloadURLSession manages supported HLS offline asset packages and reports loaded time ranges. A completed replay can be imported into the editor. An active livestream is not treated as an offline-downloadable replay. Wait for the source provider to publish a finished VOD playlist.
 
 ## Project model
 

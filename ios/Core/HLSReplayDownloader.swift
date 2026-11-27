@@ -71,7 +71,7 @@ final class HLSReplayDownloader: NSObject, ObservableObject, @preconcurrency AVA
         url: URL,
         title: String,
         userConfirmedRights: Bool
-    ) throws -> UUID {
+    ) async throws -> UUID {
         guard userConfirmedRights else { throw HLSReplayError.permissionRequired }
         guard url.scheme?.lowercased() == "https",
               url.user == nil,
@@ -79,6 +79,8 @@ final class HLSReplayDownloader: NSObject, ObservableObject, @preconcurrency AVA
               url.pathExtension.lowercased() == "m3u8" else {
             throw HLSReplayError.invalidURL
         }
+
+        try await verifyPublishedVODPlaylist(url)
 
         let id = UUID()
         let job = HLSReplayJob(
@@ -95,22 +97,51 @@ final class HLSReplayDownloader: NSObject, ObservableObject, @preconcurrency AVA
         try persist(job)
 
         let asset = AVURLAsset(url: url)
-        guard let task = session.assetDownloadTask(
-            with: asset,
-            assetTitle: job.title,
-            assetArtworkData: nil,
-            options: nil
-        ) else {
-            update(jobID: id) {
-                $0.state = .failed
-                $0.errorMessage = "iOS could not create an HLS asset download task."
-            }
-            return id
-        }
+        let downloadConfiguration = AVAssetDownloadConfiguration(asset: asset, title: job.title)
+        let task = session.makeAssetDownloadTask(downloadConfiguration: downloadConfiguration)
         task.taskDescription = id.uuidString
         task.resume()
         update(jobID: id) { $0.state = .downloading }
         return id
+    }
+
+    /// Apple only supports offline persistence for completed HLS VOD playlists.
+    /// Resolve a master playlist to a media playlist before creating an asset task;
+    /// attempting to persist an active live playlist can raise an AVFoundation exception.
+    private func verifyPublishedVODPlaylist(_ url: URL, depth: Int = 0) async throws {
+        guard depth <= 3 else { throw HLSReplayError.notReady }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("application/vnd.apple.mpegurl, application/x-mpegURL, */*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              (http.url ?? url).scheme?.lowercased() == "https",
+              data.count <= 2 * 1024 * 1024,
+              let playlist = String(data: data, encoding: .utf8) else {
+            throw HLSReplayError.notReady
+        }
+
+        let lines = playlist.components(separatedBy: .newlines)
+        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "#EXTM3U" else {
+            throw HLSReplayError.notReady
+        }
+        if lines.contains(where: { $0.trimmingCharacters(in: .whitespaces).uppercased() == "#EXT-X-ENDLIST" }) {
+            return
+        }
+
+        for index in lines.indices where lines[index].trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("#EXT-X-STREAM-INF:") {
+            let next = lines.index(after: index)
+            guard next < lines.endIndex else { continue }
+            let variantLine = lines[next].trimmingCharacters(in: .whitespaces)
+            guard !variantLine.isEmpty, !variantLine.hasPrefix("#"),
+                  let variantURL = URL(string: variantLine, relativeTo: http.url ?? url)?.absoluteURL,
+                  variantURL.scheme?.lowercased() == "https" else { continue }
+            try await verifyPublishedVODPlaylist(variantURL, depth: depth + 1)
+            return
+        }
+
+        throw HLSReplayError.notReady
     }
 
     func packageURL(for job: HLSReplayJob) -> URL? {

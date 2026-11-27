@@ -327,12 +327,14 @@ struct ImportView: View {
         }
     }
 
-    private func startHLSDownload() {
+    private func startHLSDownload() async {
+        isWorking = true
+        defer { isWorking = false }
         do {
             guard let url = URL(string: hlsURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
                 throw HLSReplayError.invalidURL
             }
-            _ = try hlsDownloads.start(
+            _ = try await hlsDownloads.start(
                 url: url,
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                 userConfirmedRights: hlsHasRights
