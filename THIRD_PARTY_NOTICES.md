@@ -12,3 +12,9 @@
 YouTube creator skills by Jake Schincariol are bundled under MIT from
 Jakeschincariol/youtube-agent-skill at a2feb2104981a375ffd4f87ee04f4f5344ac43c6.
 The original license is included in app/src/main/assets/youtube-agent/LICENSE.
+
+## iOS application
+
+- [Argmax Open-Source SDK / WhisperKit](https://github.com/argmaxinc/argmax-oss-swift) (MIT) is included as a Swift Package Manager dependency for on-device Core ML speech transcription. The multilingual tiny model is fetched on first use and is not vendored in this repository. Preserve the upstream MIT license and verify the exact model repository license before distributing predownloaded model weights.
+- AVFoundation, AVKit, SwiftUI, PhotosUI, URLSession, Core Animation, and VideoToolbox are Apple system frameworks used by the native iOS app.
+- [Kadr](https://github.com/SteliyanH/kadr) (Apache-2.0) and [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT) were evaluated as future iOS options; neither is currently included as an iOS dependency.

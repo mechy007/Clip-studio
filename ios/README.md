@@ -1,63 +1,66 @@
 # Clip Studio for iOS
 
-Clip Studio for iOS is a separate, native Apple-platform application. It lives in this ios/ directory and does not move, replace, or modify the existing root-level Android Gradle project.
+A separate native iPhone and iPad video editor. The iOS application lives in this directory; the existing Android application remains at the repository root and is not changed by this work.
 
-## Product goals
+## What is implemented in this branch
 
-- Native iPhone and iPad experience using SwiftUI.
-- Local video import, editing, captions, offline analysis, and MP4 export.
-- Creator-authorized remote media import, with resumable and progressive processing where the source supports it.
-- A provider boundary for YouTube recordings and livestream replays. YouTube downloading must remain disabled unless the required written authorization and App Store compliance are established.
-- Shared, versioned Clip Studio project specification across Android and iOS.
+- SwiftUI navigation for Home, Import, and Projects.
+- Video import from the iOS Files picker and Photos picker. Imported sources are copied into the app's private Documents area.
+- Local project persistence as versioned JSON, with source media and exports stored separately.
+- AVPlayer playback and a native AVFoundation editor.
+- Millisecond trim boundaries, Original / Vertical Fill / Vertical Fit / Square canvases, 720p / 1080p / 1440p export choices, and optional source-audio muting.
+- MP4 export using AVMutableComposition, AVMutableVideoComposition, and AVAssetExportSession. Timed caption cues are burned into the export.
+- Manual caption authoring, SRT import/export, and local Whisper caption generation through the MIT-licensed WhisperKit framework. The multilingual tiny model is downloaded on first use; transcription is limited to selections up to two minutes to keep memory demands bounded.
+- Creator-authorized direct HTTPS MP4/MOV/M4V download using HTTP byte ranges. The downloader probes range support, requires an ETag or Last-Modified validator, transfers 32 MiB chunks with at most three concurrent tasks, validates each 206 Content-Range response, persists checkpoints, and reassembles the file only after all chunks pass validation. It refuses sources larger than 8 GB.
+- Creator-authorized HLS VOD replay downloads through AVAssetDownloadURLSession, with progress and persisted replay state.
+- Background URLSession callbacks are reconnected through the app delegate.
 
-## Initial platform baseline
+This is a functional native foundation, not yet full feature parity with Android. AI highlight ranking, YAMNet event analysis, Vision face tracking, Facecam Rescue, multi-part recording analysis, animated captions, advanced audio finishing, export queues, and full Android/iOS project interchange remain planned.
 
-- Minimum deployment target: iOS 17.0.
-- Language: Swift.
-- UI: SwiftUI.
-- Media playback and composition: AVFoundation.
-- Encoding: AVAssetWriter / VideoToolbox where appropriate.
-- Face analysis: Vision.
-- Offline transcription: whisper.cpp (integration planned; validate model and binary licensing before bundling).
-- Audio event inference: evaluate the existing YAMNet ONNX model with ONNX Runtime for iOS; compare a Core ML conversion before choosing the production runtime.
-- Persistence: SwiftData, with a versioned JSON interchange format for projects.
+## Importing YouTube recordings
 
-## Import and download policy
+A YouTube recording or replay URL can be recognized by the import screen, but it is not used to retrieve audiovisual bytes. For your own channel, download the recording or finished replay through YouTube Studio or Google Takeout and then import that local file with Files or Photos. For another creator's recording, use only a source-approved file or URL.
 
-Apple App Review Guideline 5.2.3 requires explicit authorization before an app enables saving, converting, or downloading media from third-party services such as YouTube. YouTube's developer policies separately prohibit downloading, importing, caching, or storing copies of YouTube audiovisual content through YouTube API Services without prior written approval.
+This separation is intentional. Apple's App Review Guideline 5.2.3 requires explicit authorization from a third-party source before an app enables saving, converting, or downloading its media. YouTube's developer policies separately require YouTube's prior written approval for downloading, importing, backing up, caching, or storing copies of YouTube audiovisual content through YouTube API Services. A creator's channel ownership, API metadata access, or user consent alone must not be treated as that platform authorization.
 
-Therefore:
-1. Local files and creator-authorized direct media URLs are the initial supported import paths.
-2. YouTube is represented by a provider interface, not an assumed working downloader.
-3. The YouTube provider must not be enabled for distribution until written authorization and App Review requirements are satisfied.
-4. YouTube Data API metadata access is not permission to download video bytes.
-5. Never bypass DRM, access controls, signed URL restrictions, or platform restrictions.
+References:
+- [Apple App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
+- [YouTube API Services Developer Policies](https://developers.google.com/youtube/terms/developer-policies/)
 
-## Progressive download design
+## Progressive downloads and livestream replays
 
-For creator-authorized HTTP(S) sources:
-- Inspect source metadata and verify byte-range support before scheduling segmented downloads.
-- Use background URLSession download tasks with HTTP Range requests for independently downloadable byte ranges.
-- Persist a manifest containing source identity, expected size, ETag/Last-Modified validators, chunk boundaries, completed chunk checksums, and task identifiers.
-- Validate every response's status and Content-Range before accepting a chunk.
-- Write each completed segment atomically; never expose partial files as complete media.
-- Analyze completed media ranges as soon as their required audio/video dependencies are available.
-- Reassemble only after all required ranges pass validation; otherwise retain resumable checkpoints.
-- For authorized HLS VOD sources, evaluate AVAssetDownloadURLSession. Do not assume it can turn an arbitrary platform stream into a downloadable file.
+The direct-file path is for explicitly authorized HTTPS media endpoints. It requires a stable Content-Length, HTTP byte-range support, and a stable ETag or Last-Modified validator. It does not attempt to bypass DRM, login gates, signed URL restrictions, or source access controls.
 
-iOS background execution is system-managed. Background URLSession can continue supported HTTP(S) transfers while the app is suspended, but the app must recover delegate events and persisted state. Force-quitting the app cancels background transfers. Do not promise uninterrupted arbitrary background processing.
+The HLS path uses Apple's AVFoundation asset-download API. It is for supported downloadable HLS assets that are available as completed VOD replays. It cannot save an active livestream as an offline replay while the broadcast is still in progress. Wait until the platform publishes the replay.
 
-## Feature phases
+Background transfers are managed by iOS. A background URLSession can continue supported HTTP(S) downloads while the app is suspended, and iOS can relaunch the app to deliver delegate events. The operating system may schedule work later, and force-quitting the app cancels background transfers. This is not unlimited background execution.
 
-1. App shell, navigation, local import, playback, persistence.
-2. Timeline, frame-accurate trim, layouts, preview and MP4 export.
-3. Creator-authorized remote import, resumable range transfers, progressive analysis.
-4. Whisper transcription, YAMNet audio events, captions and highlight ranking.
-5. Vision face tracking, facecam rescue, audio finishing and creator presets.
-6. Cross-platform project compatibility, performance tests and TestFlight readiness.
+Apple documentation:
+- [Background URLSession downloads](https://developer.apple.com/documentation/foundation/downloading-files-in-the-background)
+- [AVAssetDownloadURLSession](https://developer.apple.com/documentation/avfoundation/avassetdownloadurlsession)
+- [Persisting HTTP Live Streams](https://developer.apple.com/documentation/avfoundation/using-avfoundation-to-play-and-persist-http-live-streams)
 
-## Build and testing
+## Build
 
-The project is intended to build with Xcode on macOS. GitHub Actions macOS runners can provide simulator builds and tests. Physical-device testing, code signing, TestFlight, and App Store distribution require Apple tooling and credentials.
+Requirements:
+- macOS with Xcode 16 or newer.
+- iOS deployment target: 17.0.
+- Swift Package Manager access to https://github.com/argmaxinc/argmax-oss-swift (WhisperKit product).
 
-See the architecture blueprint at ../docs/ios/ARCHITECTURE.md.
+Open ios/ClipStudio.xcodeproj, allow Xcode to resolve Swift packages, select the ClipStudio scheme, and build for an iOS Simulator. The GitHub Actions workflow also builds both simulator and generic iOS device targets without code signing.
+
+A developer-signed physical-device build, TestFlight upload, and App Store release require an Apple Developer account, signing credentials, and real-device QA. These cannot be substituted by a simulator CI build.
+
+## Project structure
+
+- App/: SwiftUI entry point and background URLSession restoration.
+- Features/Home/: Home dashboard, import flows, and saved-project list.
+- Features/Editor/: playback, trim controls, captions, transcription, and export UI.
+- Core/ProjectModels.swift: local project model and atomic JSON persistence.
+- Core/VideoEditorService.swift: subtitle parsing, composition and MP4 export.
+- Core/RangeDownloadManager.swift: authorized HTTP byte-range downloader.
+- Core/HLSReplayDownloader.swift: supported HLS VOD asset downloads.
+- Core/WhisperTranscriptionService.swift: on-device speech-to-text adapter.
+- Core/Import/: source recognition and provider boundaries.
+
+See [the architecture and implementation status](../docs/ios/ARCHITECTURE.md) and [the asset/component audit](ASSET_AND_COMPONENT_AUDIT.md).

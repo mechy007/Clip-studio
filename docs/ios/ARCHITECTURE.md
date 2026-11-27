@@ -1,143 +1,105 @@
-# Clip Studio iOS Architecture Blueprint
+# Clip Studio iOS — architecture and implementation status
 
-## 1. Repository boundary
+## Repository boundary
 
-The Android application remains at the repository root:
-- app/
-- build.gradle.kts
-- settings.gradle.kts
-- existing Gradle wrapper and workflows
+The Android app remains rooted at app/ with its Gradle build files at repository root. The iOS app is a separate native project under ios/. No Android source, build configuration, or assets are relocated.
 
-The iOS application is independent under ios/. No Android files or build configuration should be moved to make room for it.
+## Implemented native architecture
 
-## 2. Proposed modules
+| Area | Implementation |
+|---|---|
+| UI | SwiftUI Home / Import / Projects / Editor views |
+| Local media | Files picker + Photos picker; copy source into app Documents |
+| Project persistence | Atomic JSON files under Application Support; relative media/export paths; schema version 1 |
+| Playback | AVPlayer / VideoPlayer |
+| Editing | AVMutableComposition + AVMutableVideoComposition |
+| Export | AVAssetExportSession MP4 with timed Core Animation caption layers |
+| Captions | Editable cue records; SRT import/export; WhisperKit segment timing |
+| Speech AI | Argmax WhisperKit, multilingual tiny model, Core ML inference, first-use model download |
+| HTTP import | Background URLSession download tasks; 32 MiB HTTP Range chunks; maximum three active chunks; ETag / Last-Modified checks; persisted manifests; reassembly after validation; 8 GB cap |
+| HLS replay | AVAssetDownloadURLSession for supported completed VOD assets |
+| Background restoration | Stable URLSession identifiers and UIApplicationDelegate event handoff |
 
-    ios/
-      ClipStudio.xcodeproj/
-      App/
-        ClipStudioApp.swift
-        AppEnvironment.swift
-      Features/
-        Home/
-        Import/
-        Highlights/
-        Editor/
-        Captions/
-        Projects/
-        AIHub/
-        Export/
-      Core/
-        ProjectModel/
-        Media/
-        Import/
-        Downloads/
-        Transcription/
-        AudioAnalysis/
-        VideoAnalysis/
-        Rendering/
-        Persistence/
-      Resources/
-        Models/
-        Presets/
-      Tests/
+## Import source rules
 
-Keep feature views thin. Put media work, provider logic, persistence, and export in testable services.
+### Local sources
+Files and Photos picker results are copied into the app's private Documents media directory. This protects projects from temporary security-scoped access expiring and keeps the original source untouched.
 
-## 3. Main services
+### YouTube
+The provider recognizes common watch, short, live, embed, and youtu.be URL shapes and canonicalizes the video reference. It does not retrieve, cache, or download audiovisual content. Creators can download their own recording through YouTube Studio / Google Takeout and import the resulting file.
 
-- MediaLibraryService: Photos picker and Files import, security-scoped URL handling, metadata inspection.
-- PlaybackService: AVPlayer-based playback and time observation.
-- ProjectStore: SwiftData persistence and schema migrations.
-- ProjectInterchange: versioned JSON encode/decode for Android/iOS project interchange.
-- ImportProvider: protocol for local, authorized direct-file, authorized HLS, and separately gated YouTube sources.
-- DownloadCoordinator: background URLSession orchestration, pause/resume, task restoration and progress.
-- RangeManifestStore: source validators, range boundaries, chunk state and checksums.
-- ProgressiveAnalysisCoordinator: schedule analysis only when required media ranges are present and validated.
-- TranscriptionService: whisper.cpp adapter.
-- AudioEventService: YAMNet inference adapter; ONNX Runtime vs Core ML remains a measured implementation choice.
-- FaceTrackingService: Vision face detection/tracking.
-- CompositionService: AVMutableComposition and AVVideoComposition graph.
-- ExportService: AVAssetWriter pipeline, progress, cancellation and recovery.
+No extractor, undocumented endpoint, cookie scraping, signature deciphering, DRM circumvention, or YouTube API media-byte download is included. Metadata discovery is a distinct capability and is not download authorization. Re-enable any YouTube media provider only after receiving platform-level written authorization that covers the exact app behavior and after preparing evidence for App Review.
 
-## 4. YouTube and live replay provider
+### Direct HTTP media
+The direct downloader requires:
+1. HTTPS and no embedded URL username/password.
+2. Successful HEAD with a stable content length.
+3. A bytes=0-0 probe returning HTTP 206 and exact Content-Range.
+4. A strong ETag or Last-Modified validator.
+5. A source no larger than 8 GB.
 
-The app must distinguish metadata discovery from media-byte access:
-- YouTube Data API may be used for permitted metadata and channel/broadcast discovery within its policies.
-- API access does not grant permission to download or cache audiovisual content.
-- The YouTube media provider stays unavailable for downloading until written authorization covers the intended behavior and App Review requirements are met.
-- Do not use undocumented endpoints, signature deciphering, cookie scraping, DRM circumvention, or other access-control bypasses.
+The transfer uses three concurrent 32 MiB chunks. Each range has an If-Range validator. Each temporary download must return 206, the exact expected Content-Range, a matching entity validator, and the expected byte count before it is committed as a chunk. The final file is assembled in order and its total size is checked before the import UI exposes it. Interrupted chunks are retried at their last completed chunk boundary; partially transferred chunks are restarted rather than trusted.
 
-For a creator-authorized replay source, the provider may expose:
-- replay readiness and availability state;
-- source duration and format metadata;
-- stable media URL or HLS manifest;
-- range or segment capabilities;
-- source validators and expiry behavior.
+The current implementation intentionally fails closed when the server does not meet these requirements. It does not claim to progressively decode arbitrary MP4 byte ranges; the current progressive behavior is download/checkpointing, followed by editing after final reassembly. Parsing incomplete MP4 fragments or editing ready ranges while later ranges are still downloading is a future phase.
 
-A replay that is still being prepared must be represented as preparing, not as a failed or complete recording. Polling must be bounded and respectful. Once the provider confirms a stable authorized source, the regular download pipeline can start.
+### HLS VOD
+AVAssetDownloadURLSession manages supported HLS offline asset packages and reports loaded time ranges. A completed replay can be imported into the editor. An active livestream is not treated as an offline-downloadable replay. Wait for the source provider to publish a finished VOD playlist.
 
-## 5. Progressive and resumable downloads
+## Project model
 
-### HTTP range path
+ClipProject is local JSON schema version 1. It includes a stable project UUID, source display name, app-relative source path, duration, trim boundaries in integer milliseconds, output layout, export quality, audio mute flag, caption cues, export path, and timestamps.
 
-1. Request metadata with HEAD or a small range probe.
-2. Confirm Accept-Ranges: bytes, a stable length, and a validator (ETag or Last-Modified) where available.
-3. Divide the file into bounded ranges.
-4. Schedule HTTP Range requests using background URLSession download tasks.
-5. Validate HTTP 206 and exact Content-Range; reject a 200 full-body response where a partial range was expected.
-6. Verify source validator has not changed between chunks.
-7. Move temporary downloads atomically into the project checkpoint directory.
-8. Publish completed ranges to progressive analysis.
-9. Reassemble and validate the final media before editing/export.
+The Android project model contains additional workflow state for multipart recordings, drafts, presets, highlight analysis, facecam/gameplay crops, audio finishing, and export queues. Cross-platform interchange is not yet claimed: a shared versioned schema and migration/conversion tests are required before Android projects can be opened losslessly in iOS.
 
-If range support or stable validators are unavailable, fall back to one resumable full-file transfer where supported. Do not fake progressive availability.
+## Editing and export
 
-### HLS path
+The editor currently supports:
+- trim start and end in milliseconds with a minimum export duration check;
+- original aspect, vertical fill, vertical fit, and square canvas modes;
+- 720p, 1080p and 1440p quality selections;
+- optional original-audio mute;
+- manual caption cues, SRT import/export, and speech-to-text caption generation;
+- MP4 rendering with visible caption overlays.
 
-For authorized HLS assets, use AVFoundation's asset-download facilities when the source and media format are supported. Preserve audio/subtitle media selections as appropriate. HLS segment downloading is not a workaround for platform download restrictions.
+Export renders a new file and preserves the imported source. The current UI is a first functional editor, not a multitrack professional timeline. Separate facecam/gameplay regions, keyframes, animated overlays, audio fades/gains, and render queues remain planned.
 
-### Background behavior
+## AI and analysis roadmap
 
-Use a stable background URLSession identifier and restore tasks on launch. Persist task IDs and chunk state before starting work. Handle relaunch callbacks and call the system completion handler after delegate events are processed. iOS may defer background work; force-quit cancels background URLSession transfers. UI and analysis must tolerate suspension and relaunch.
+1. Add a portable highlight model and analysis-result persistence.
+2. Port the Android audio-window/RMS heuristics.
+3. Evaluate the repository's existing YAMNet ONNX model under ONNX Runtime for iOS or convert it to Core ML; keep the Apache-2.0 model notice.
+4. Add Vision face detection and track smoothing for facecam framing.
+5. Reimplement Facecam Rescue and split-layout crop handling with Core Image / AVFoundation.
+6. Port selected MIT creator tools to deterministic Swift; do not bundle a Python runtime only to run Android-side scripts.
+7. Add explicit export queue recovery and storage estimates.
 
-## 6. Shared project format
+## Background task behavior
 
-Use a versioned JSON project document with:
-- schemaVersion and appVersion;
-- source identity and media metadata;
-- clip start/end in integer milliseconds or rational media time;
-- output canvas, aspect ratio and frame rate;
-- normalized crop rectangles and layout definitions;
-- caption segments with start/end, text, style and position;
-- audio gain, fades and processing options;
-- highlight timestamps, scores and detection reasons;
-- export configuration.
+Background URLSession identifiers are stable and app-delegate events are forwarded to the corresponding singleton. The system may suspend, delay, or relaunch the app. Force-quitting cancels background URLSession transfers, and compute-heavy analysis is not promised to run indefinitely in the background.
 
-Media bytes are stored separately. Use stable IDs and explicit migration rules. Never serialize platform-specific absolute sandbox paths as portable source identity.
+## Security / privacy
 
-## 7. Performance and quality gates
+- No API keys are embedded in the client.
+- Imported files remain local by default.
+- Download manifests are stored under Application Support with file protection enabled after first unlock.
+- URL and media metadata are treated as untrusted input.
+- Only explicit creator/source authorization is accepted for external media bytes.
+- Do not bypass DRM, authentication, signed URL expiry, or service restrictions.
 
-- Keep UI responsive during import, analysis and rendering.
-- Bound concurrent downloads and inference jobs.
-- Monitor thermal state, memory pressure, battery and free disk space.
-- Avoid loading full source videos into memory.
-- Test corrupt, truncated, changing, expired and non-range sources.
-- Test interrupted transfers, app suspension, app relaunch and force-quit behavior.
-- Compare Android/iOS project interchange and output framing.
-- Test on real iPhone and iPad hardware before release.
+## Quality gates still required before release
 
-## 8. Security and privacy
+- Execute the GitHub Actions simulator and generic-device builds after each code change.
+- Add XCTest coverage for SRT parsing, project round-trip/migrations, URL validation, Content-Range validation, and retry/resume state.
+- Add fixture-server integration tests for 206/200 responses, ETag changes, truncation, redirects, and connection failures.
+- Test on real iPhone and iPad devices under memory pressure, low storage, thermal load, suspension, relaunch, and force-quit.
+- Verify AVFoundation crop/orientation behavior with landscape, portrait, rotated, variable-frame-rate, HDR, and multi-audio-track samples.
+- Add signed-device, TestFlight, privacy nutrition-label, and App Review preparation only after the above gates pass.
 
-- Do not embed API secrets in the app.
-- Store OAuth tokens in Keychain.
-- Use least-privilege file access and security-scoped bookmarks where required.
-- Treat imported media and metadata as untrusted input.
-- Keep media local by default; clearly disclose any external AI/API processing.
-- Do not bypass DRM or source access controls.
+## Primary upstream references
 
-## 9. References
-
-- Apple App Review Guidelines, sections 5.2.2 and 5.2.3: https://developer.apple.com/app-store/review/guidelines/
-- Apple background URLSession downloads: https://developer.apple.com/documentation/foundation/downloading-files-in-the-background
-- Apple AVAssetDownloadURLSession: https://developer.apple.com/documentation/avfoundation/avassetdownloadurlsession
-- YouTube API Services Developer Policies: https://developers.google.com/youtube/terms/developer-policies/
+- [Apple App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
+- [YouTube API Services Developer Policies](https://developers.google.com/youtube/terms/developer-policies/)
+- [Apple background URLSession downloads](https://developer.apple.com/documentation/foundation/downloading-files-in-the-background)
+- [Apple AVAssetDownloadURLSession](https://developer.apple.com/documentation/avfoundation/avassetdownloadurlsession)
+- [Apple HTTP Live Streams persistence sample](https://developer.apple.com/documentation/avfoundation/using-avfoundation-to-play-and-persist-http-live-streams)
+- [Argmax Open-Source SDK / WhisperKit](https://github.com/argmaxinc/argmax-oss-swift)

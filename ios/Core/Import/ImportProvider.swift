@@ -7,7 +7,7 @@ enum ImportSourceKind: String, Codable {
     case youtube
 }
 
-struct ImportSourceDescriptor: Codable, Identifiable {
+struct ImportSourceDescriptor: Codable {
     let id: UUID
     let kind: ImportSourceKind
     let displayName: String
@@ -23,11 +23,85 @@ enum ImportProviderError: Error {
 
 protocol ImportProvider {
     var kind: ImportSourceKind { get }
-
     func resolve(_ input: String) async throws -> ImportSourceDescriptor
 }
 
-/// Describes replay readiness separately from the media download itself.
+enum YouTubeReference {
+    static func videoID(from input: String) -> String? {
+        guard let components = URLComponents(string: input.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let host = components.host?.lowercased() else { return nil }
+
+        if host == "youtu.be" || host == "www.youtu.be" {
+            return components.path.split(separator: "/").first.map(String.init)
+        }
+
+        guard host == "youtube.com" || host.hasSuffix(".youtube.com") else { return nil }
+        if let id = components.queryItems?.first(where: { $0.name == "v" })?.value, !id.isEmpty {
+            return id
+        }
+
+        let parts = components.path.split(separator: "/")
+        guard parts.count >= 2,
+              ["live", "shorts", "embed", "v"].contains(String(parts[0])) else { return nil }
+        return String(parts[1])
+    }
+
+    static func canonicalWatchURL(for input: String) -> URL? {
+        guard let id = videoID(from: input),
+              id.range(of: #"^[A-Za-z0-9_-]{6,}$"#, options: .regularExpression) != nil else { return nil }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.youtube.com"
+        components.path = "/watch"
+        components.queryItems = [URLQueryItem(name: "v", value: id)]
+        return components.url
+    }
+}
+
+/// Recognizes a YouTube recording reference only. It does not retrieve or cache
+/// audiovisual bytes; metadata recognition is not download authorization.
+struct YouTubeImportProvider: ImportProvider {
+    let kind: ImportSourceKind = .youtube
+
+    func resolve(_ input: String) async throws -> ImportSourceDescriptor {
+        guard let url = YouTubeReference.canonicalWatchURL(for: input),
+              let id = YouTubeReference.videoID(from: input) else {
+            throw ImportProviderError.unsupportedSource
+        }
+        return ImportSourceDescriptor(
+            id: UUID(),
+            kind: .youtube,
+            displayName: "YouTube recording \(id)",
+            sourceURL: url,
+            isCreatorAuthorized: false
+        )
+    }
+}
+
+/// Resolves a direct HTTPS media URL without transferring bytes. The user must
+/// separately confirm that they have permission before the downloader starts.
+struct AuthorizedDirectImportProvider: ImportProvider {
+    let kind: ImportSourceKind = .authorizedDirectFile
+
+    func resolve(_ input: String) async throws -> ImportSourceDescriptor {
+        guard let url = URL(string: input.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme?.lowercased() == "https",
+              url.user == nil, url.password == nil,
+              ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) else {
+            throw ImportProviderError.unsupportedSource
+        }
+        return ImportSourceDescriptor(
+            id: UUID(),
+            kind: kind,
+            displayName: url.lastPathComponent,
+            sourceURL: url,
+            isCreatorAuthorized: false
+        )
+    }
+}
+
+/// Describes replay readiness separately from media transfer. A replay is
+/// downloadable through the HLS provider only when published as supported VOD.
 enum ReplayAvailability: String, Codable {
     case upcoming
     case live
@@ -44,28 +118,14 @@ struct ReplayDescriptor: Codable, Identifiable {
     let lastCheckedAt: Date
 }
 
-/// A provider may expose a replay only when it is authorized to provide the
-/// underlying media bytes. Metadata discovery alone is not download permission.
 protocol ReplaySourceResolving {
     func replay(for input: String) async throws -> ReplayDescriptor
 }
 
-/// Capability discovered from a creator-authorized direct media source.
 struct ProgressiveDownloadCapability: Codable {
     let supportsByteRanges: Bool
     let expectedByteCount: Int64?
     let entityTag: String?
     let lastModified: String?
     let contentType: String?
-}
-
-/// YouTube media-byte access is intentionally gated. Metadata access does not
-/// grant permission to download or cache audiovisual content. Enable a concrete
-/// provider only after the required written authorization and App Review review.
-struct YouTubeImportProvider: ImportProvider {
-    let kind: ImportSourceKind = .youtube
-
-    func resolve(_ input: String) async throws -> ImportSourceDescriptor {
-        throw ImportProviderError.authorizationRequired
-    }
 }

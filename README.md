@@ -1,6 +1,10 @@
 # Clip Studio
 
-Clip Studio is an Android-only editor for turning recorded videos into short clips. It runs on 64-bit ARM phones with Android 10 or newer.
+Clip Studio is a video editor with two independent native applications: the existing Android application at the repository root and a separate iPhone/iPad application under ios/. The Android app continues to run on 64-bit ARM phones with Android 10 or newer.
+
+## Native iOS application
+
+The native iOS project is under [ios/](ios/README.md) and does not replace or relocate the Android app. Its current functional branch includes Files/Photos import, saved projects, trim/layout controls, caption editing and SRT support, on-device WhisperKit transcription, MP4 export, creator-authorized resumable HTTPS range downloads, and supported HLS VOD replay imports. See the [iOS feature and limitation list](ios/README.md), [architecture status](docs/ios/ARCHITECTURE.md), and [reusable assets/component audit](ios/ASSET_AND_COMPONENT_AUDIT.md). YouTube link recognition is included, but media-byte extraction remains disabled pending platform-level written authorization.
 
 ## Import and edit
 
