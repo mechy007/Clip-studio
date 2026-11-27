@@ -202,7 +202,7 @@ final class HLSReplayDownloader: NSObject, ObservableObject, @preconcurrency AVA
 
         do {
             let source = URL(fileURLWithPath: sourcePath)
-            let destination = rootDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+            let destination = rootDirectory.appendingPathComponent(id.uuidString).appendingPathExtension("movpkg")
             try? fileManager.removeItem(at: destination)
             try fileManager.moveItem(at: source, to: destination)
             update(jobID: id) {
